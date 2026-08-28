@@ -67,3 +67,18 @@ void transpose(const u8 *src, int w, int h, u8 *dst)
         for (int x = 0; x < w; x++)
             dst[x * h + y] = src[y * w + x];
 }
+
+// resize a w*h image to nw*nh with the spline36 kernel, pixel centres
+// aligned (shift = 0); implemented as two separable passes
+void resample2D(const u8 *src, int w, int h, int nw, int nh, u8 *dst)
+{
+    // horizontal: transpose -> vertical resample (w -> nw) -> transpose back
+    std::vector<u8> t1(std::size_t(h) * w);
+    transpose(src, w, h, t1.data());                        // h x w
+    std::vector<u8> t2(std::size_t(h) * nw);
+    resampleV(t1.data(), h, w, nw, 0.0, t2.data());         // h x nw
+    std::vector<u8> tmp(std::size_t(nw) * h);
+    transpose(t2.data(), h, nw, tmp.data());                // nw x h
+    // vertical
+    resampleV(tmp.data(), nw, h, nh, 0.0, dst);             // nw x nh
+}

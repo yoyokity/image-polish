@@ -28,6 +28,8 @@
  */
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -100,9 +102,12 @@ static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vec
 // ---------------------------------------------------------------------------
 // Processing steps, applied to the luma plane in command-line order
 // ---------------------------------------------------------------------------
+enum class StepKind { AA, Denoise, Resize };
+
 struct Step {
-    bool  aa;      // true: anti-aliasing (fixed params); false: NLMeans denoise
-    float h;       // NLMeans strength for denoise steps
+    StepKind kind;
+    float h = 0.0f;      // NLMeans strength for Denoise steps
+    int rw = -1, rh = -1; // Resize targets (-1: keep proportional)
 };
 
 // Anti-aliasing step: the EEDI2 chain plus Repair(2), parameters fixed to the
@@ -116,18 +121,80 @@ static void aaStep(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
     plane = std::move(aa);
 }
 
-static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int w, int h,
-                     const std::vector<Step> &steps)
+// Parse "--resize WxH | Wx | xH"; a missing side (-1) is kept proportional.
+static void parseResize(const char *s, int &rw, int &rh)
+{
+    std::string spec = s;
+    std::transform(spec.begin(), spec.end(), spec.begin(),
+                   [](char c) { return char(std::tolower((unsigned char)c)); });
+    const auto x = spec.find('x');
+    if (x == std::string::npos) {
+        std::fprintf(stderr, "error: --resize expects WxH, Wx or xH (e.g. 1920x1080)\n");
+        std::exit(1);
+    }
+    const std::string a = spec.substr(0, x), b = spec.substr(x + 1);
+    if (a.empty() && b.empty()) {
+        std::fprintf(stderr, "error: --resize needs at least one dimension\n");
+        std::exit(1);
+    }
+    auto side = [](const std::string &v) -> int {
+        if (v.empty())
+            return -1;
+        const int n = std::atoi(v.c_str());
+        if (n <= 0) {
+            std::fprintf(stderr, "error: --resize dimensions must be positive\n");
+            std::exit(1);
+        }
+        return n;
+    };
+    rw = side(a);
+    rh = side(b);
+}
+
+static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
+                     const std::vector<Step> &steps, std::vector<u8> *refRgb)
 {
     for (const Step &st : steps) {
-        if (st.aa) {
+        switch (st.kind) {
+        case StepKind::AA:
+            if (w < 8 || h < 8) {
+                std::fprintf(stderr, "error: --aa needs w,h >= 8 (current %d x %d)\n", w, h);
+                std::exit(1);
+            }
             aaStep(p, plane, w, h);
-        } else {
+            break;
+        case StepKind::Denoise: {
             NlmeansParams np;               // fixed config: a=2, s=4, wmode=3, wref=1
             np.h = st.h;
             std::vector<u8> out(std::size_t(w) * h);
             nlmeans(plane.data(), w, h, np, out.data());
             plane = std::move(out);
+            break;
+        }
+        case StepKind::Resize: {
+            int nw = st.rw, nh = st.rh;
+            if (nw < 0) nw = std::max(1, int(std::llround(double(nh) * w / h)));
+            if (nh < 0) nh = std::max(1, int(std::llround(double(nw) * h / w)));
+            std::vector<u8> out(std::size_t(nw) * nh);
+            resample2D(plane.data(), w, h, nw, nh, out.data());
+            plane = std::move(out);
+            if (refRgb) {
+                // keep the chroma reference size in lockstep so applyLuma stays paired
+                std::vector<u8> ch(std::size_t(w) * h), gen(std::size_t(nw) * nh);
+                std::vector<u8> scaled(std::size_t(nw) * nh * 3);
+                for (int c = 0; c < 3; c++) {
+                    for (int i = 0; i < w * h; i++)
+                        ch[i] = (*refRgb)[3 * i + c];
+                    resample2D(ch.data(), w, h, nw, nh, gen.data());
+                    for (int i = 0; i < nw * nh; i++)
+                        scaled[3 * i + c] = gen[i];
+                }
+                *refRgb = std::move(scaled);
+            }
+            w = nw;
+            h = nh;
+            break;
+        }
         }
     }
 }
@@ -138,21 +205,24 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int w, int h,
 static void printHelp()
 {
     std::printf(
-        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise\n"
+        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise + resize\n"
         "\n"
-        "Usage: aa.exe -i <input> [-o <output>] [--aa] [--denoise <h>]\n"
+        "Usage: aa.exe -i <input> [-o <output>] [--aa] [--denoise <h>] [--resize <W>x<H>]\n"
         "\n"
         "  -i, --input <file>    input image (PNG/BMP/PNM/TGA, gray or RGB)\n"
         "  -o, --output <file>   output image (format from extension);\n"
         "                        omitted: <input basename>_output.<same ext>\n"
         "  --aa                  anti-aliasing (EEDI2 chain, parameters fixed)\n"
         "  --denoise <h>         NLMeans denoise, <h> is the filter strength\n"
+        "  --resize <W>x<H>      resize with spline36; one side may be omitted\n"
+        "                        (1920x or x1080, the other side is proportional)\n"
         "\n"
         "Steps are executed in the order they appear on the command line;\n"
         "with no step the image is passed through unchanged.\n"
         "\n"
         "Examples:\n"
         "  aa.exe -i in.png --denoise 5 --aa\n"
+        "  aa.exe -i in.png --resize 1920x --aa\n"
         "  aa.exe -i in.png -o out.png --aa --denoise 3\n");
 }
 
@@ -173,8 +243,13 @@ int main(int argc, char **argv)
         };
         if (a == "-i" || a == "--input") input = next("-i");
         else if (a == "-o" || a == "--output") output = next("-o");
-        else if (a == "--aa") steps.push_back({true, 0.0f});
-        else if (a == "--denoise") steps.push_back({false, static_cast<float>(std::atof(next("--denoise")))});
+        else if (a == "--aa") steps.push_back({StepKind::AA, 0.0f, -1, -1});
+        else if (a == "--denoise") steps.push_back({StepKind::Denoise, static_cast<float>(std::atof(next("--denoise"))), -1, -1});
+        else if (a == "--resize") {
+            int rw = 0, rh = 0;
+            parseResize(next("--resize"), rw, rh);
+            steps.push_back({StepKind::Resize, 0.0f, rw, rh});
+        }
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
         else if (a == "-h" || a == "--help") { printHelp(); return 0; }
@@ -201,7 +276,7 @@ int main(int argc, char **argv)
     }
 
     for (const Step &st : steps)
-        if (!st.aa && st.h <= 0.0f) {
+        if (st.kind == StepKind::Denoise && st.h <= 0.0f) {
             std::fprintf(stderr, "error: --denoise h must be positive\n");
             return 1;
         }
@@ -265,13 +340,14 @@ int main(int argc, char **argv)
 
     if (!steps.empty()) {
         if (img.ch == 1) {
-            runSteps(p, img.p, img.w, img.h, steps);
+            runSteps(p, img.p, img.w, img.h, steps, nullptr);
         } else {
             std::vector<u8> y;
             rgbLuma(img.p.data(), img.w * img.h, y);
-            runSteps(p, y, img.w, img.h, steps);
+            std::vector<u8> refRgb = img.p;              // chroma reference, size kept in lockstep
+            runSteps(p, y, img.w, img.h, steps, &refRgb);
             std::vector<u8> rgb;
-            applyLuma(y, img.p.data(), img.w * img.h, rgb);   // img.p is still the original RGB
+            applyLuma(y, refRgb.data(), img.w * img.h, rgb);
             img.p = std::move(rgb);
         }
     }

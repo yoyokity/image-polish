@@ -56,17 +56,20 @@ out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
 |---|---|
 | `--aa` | 去锯齿：EEDI2 链（两遍方向插值 + spline36 重采样）+ Repair 模式 2，参数固定 |
 | `--denoise N` | NLMeans 降噪，`N` 为滤波强度 `h`（> 0）|
+| `--resize WxH` | 用 spline36 缩放（shift=0 中心对齐）；一侧可省略（`1920x` / `x1080`），另一侧按原宽高比计算 |
 
-步骤按命令行出现顺序依次执行，每一步都在前一步的结果上继续；`--aa` 与
-`--denoise` 均可省略、可重复、顺序任意。全部省略则输出与输入相同。
+步骤按命令行出现顺序依次执行，每一步都在前一步的结果上继续；各步骤均可
+省略、可重复、顺序任意。全部省略则输出与输入相同。彩色图缩放时色度用同一
+spline36 核同样缩放（先换亮度，色度仍保持原图语义）。
 
 示例：
 
 ```
 out/aa.exe -i clip.png --aa                       # -> clip_output.png
 out/aa.exe -i in.png --denoise 5                  # -> in_output.png
+out/aa.exe -i in.png --resize 1920x --aa          # 先缩放到 1920 宽，再去锯齿
+out/aa.exe -i in.png --aa --resize x1080 --denoise 5
 out/aa.exe -i in.png -o out.png --denoise 5 --aa
-out/aa.exe -i in.png -o out.png --aa --denoise 3
 ```
 
 ## 编译
@@ -110,6 +113,8 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
   处理 → 晶格插值（噪声阈值 nt8 主搜索 + nt7 回退）→ 后处理。
 - **重采样**：fmtconv 约定，`srcPos(o) = (o+0.5)*ratio - 0.5 + shift`
   （像素中心对齐），spline36 核按 `max(ratio,1)` 缩放、按权值总和归一化。
+  `--resize` 用同一内核、shift=0 的中心对齐缩放（可分离两趟：转置 → 纵向
+  重采样 → 转置）。
 - **Repair 模式 2**：对每个像素取参考图 b 的 3×3 邻域排序后的
   `clamp(a, n[1], n[7])`，边界行列直接复制 a。
 - **NLMeans**（vs-nlm-ispc / KNLMeansCL drop-in 的移植，参数固定 d=0、a=2、
