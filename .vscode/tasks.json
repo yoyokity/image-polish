@@ -1,0 +1,65 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "mkdir out",
+            "type": "shell",
+            "detail": "创建 out 构建目录（build 的前置任务）",
+            "command": "cmd",
+            "args": ["/c", "if not exist out mkdir out"],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "clear": true
+            }
+        },
+        {
+            "label": "build",
+            "type": "shell",
+            "detail": "用 clang++ 编译 src 下全部源文件生成 out/aa.exe",
+            "command": "clang++",
+            "args": [
+                "--target=x86_64-w64-windows-gnu",
+                "-std=c++17",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Wno-missing-field-initializers",
+                "src/main.cpp",
+                "src/eedi2.cpp",
+                "src/resample.cpp",
+                "src/repair.cpp",
+                "src/imageio.cpp",
+                "-o",
+                "out/aa.exe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PATH": "C:\\Program Files\\LLVM\\bin;${env:PATH}"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            },
+            "dependsOn": "mkdir out",
+            "presentation": {
+                "reveal": "always",
+                "clear": true
+            }
+        }
+    ]
+}

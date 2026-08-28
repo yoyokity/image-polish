@@ -4,7 +4,7 @@
 VapourSynth / 插件，直接对图片跑：
 
 ```
-aa.exe -i 输入图片 -o 输出图片
+out/aa.exe -i 输入图片 -o 输出图片
 ```
 
 ## 对应的 VapourSynth 脚本
@@ -29,7 +29,7 @@ aaed = core.rgvs.Repair(aaed, clip, 2)                      # 钳制到原图邻
 ## 使用方法
 
 ```
-aa.exe -i input.png -o output.png
+out/aa.exe -i input.png -o output.png
 ```
 
 - 输入格式：PNG / BMP / TGA / JPG / PGM / PPM / PNM（stb_image 支持的范围），
@@ -57,24 +57,42 @@ aa.exe -i input.png -o output.png
 示例：
 
 ```
-aa.exe -i clip.png -o clip_aa.png
-aa.exe -i in.bmp -o out.png --maxd 32 --nt 30
-aa.exe -i gray.pgm -o gray_aa.pgm --repair 0
+out/aa.exe -i clip.png -o clip_aa.png
+out/aa.exe -i in.bmp -o out.png --maxd 32 --nt 30
+out/aa.exe -i gray.pgm -o gray_aa.pgm --repair 0
 ```
 
 ## 编译
 
-任意 C++17 编译器，单文件无第三方库（stb_image 已内置）：
+任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`
+（main / eedi2 / resample / repair / imageio），构建产物输出到 `out/`：
+
+VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run Build Task`），
+会自动创建 `out/` 目录再编译。
+
+默认工具链是 LLVM clang（https://llvm.org 或 `winget install LLVM.LLVM`），
+以 GNU 模式配合 MinGW-w64 运行库（例如
+<https://github.com/niXman/mingw-builds-binaries/releases>，选带 UCRT 的
+x86_64 版本，解压后把 `bin` 目录加进 PATH），编译时用 `--target` 指定 target：
 
 ```
-g++ -O2 -std=c++17 -o aa.exe aa.cpp
+clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
+    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp
 ```
 
-本机没有 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
+或者直接用 MinGW-w64 自带的 g++：
+
+```
+g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
+    src/resample.cpp src/repair.cpp src/imageio.cpp
+```
+
+没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
 
 ```
 python -m pip install ziglang
-python -m ziglang c++ -O2 -std=c++17 -o aa.exe aa.cpp
+python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
+    src/resample.cpp src/repair.cpp src/imageio.cpp
 ```
 
 ## 实现要点
