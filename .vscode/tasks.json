@@ -30,6 +30,7 @@
                 "src/resample.cpp",
                 "src/repair.cpp",
                 "src/imageio.cpp",
+                "src/nlmeans.cpp",
                 "-o",
                 "out/aa.exe"
             ],

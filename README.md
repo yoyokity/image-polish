@@ -1,11 +1,15 @@
-# aa.exe — EEDI2 抗锯齿命令行工具（C++ 独立实现）
+# aa.exe — EEDI2 抗锯齿 + NLMeans 降噪命令行工具（C++ 独立实现）
 
-把一段经典 VapourSynth 抗锯齿链完整移植为单文件 C++ 程序，无需安装
-VapourSynth / 插件，直接对图片跑：
+把 VapourSynth 抗锯齿 + 降噪链完整移植为独立 C++ 程序（源码按模块拆在
+`src/`），无需安装 VapourSynth / 插件，直接对图片跑：
 
 ```
-out/aa.exe -i 输入图片 -o 输出图片
+out/aa.exe -i 输入图片 [-o 输出图片] [--aa] [--denoise 5]
 ```
+
+处理步骤按命令行出现顺序执行：`--aa` 去锯齿（参数固定），`--denoise N` 做
+NLMeans 降噪（N 即滤波强度 h）；两个都不给则原样输出。省略 `-o` 时输出为
+`<输入名>_output.<原扩展名>`（如 `in.png` → `in_output.png`）。
 
 ## 对应的 VapourSynth 脚本
 
@@ -18,55 +22,57 @@ aa_clip = core.eedi2.EEDI2(aa_clip, field=1, mthresh=10, lthresh=20, vthresh=20,
                            maxd=24, nt=50)
 aa_clip = core.fmtc.resample(aa_clip, h, w, 0, -0.5).std.Transpose()
 aaed = core.std.ShufflePlanes([aa_clip, clip], [0, 1, 2], vs.YUV)  # 色度保持原图
+aaed = core.nlm_cuda.NLMeans(aaed, d=0, wmode=3, h=5)      # 可选降噪（CPU 版用 core.nlm_ispc）
 aaed = core.rgvs.Repair(aaed, clip, 2)                      # 钳制到原图邻域
 ```
 
 流程：亮度平面先做「EEDI2 高度翻倍 → spline36 缩回原尺寸（sy=-0.5）→ 转置」，
 再换方向重复一遍。两次方向插值会把斜边的阶梯折线"抹匀"成平滑过渡，即抗锯齿效果；
 色度平面保持原图不动；最后 Repair（模式 2）把结果逐像素钳制到原图 3×3 邻域的
-[第 2 小, 第 2 大] 区间，防止过度偏离原图。
+[第 2 小, 第 2 大] 区间，防止过度偏离原图。降噪（NLMeans，d=0 只用当前帧、
+wmode=3、h 由 `--denoise` 指定）在亮度平面上进行，可按命令行顺序插在链路的
+任意位置（本工具与脚本一样只处理亮度，色度不动）。
 
 ## 使用方法
 
 ```
-out/aa.exe -i input.png -o output.png
+out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
 ```
 
 - 输入格式：PNG / BMP / TGA / JPG / PGM / PPM / PNM（stb_image 支持的范围），
   灰度（1 通道）或彩色（3 通道）均可。
 - 输出格式：由 `-o` 的扩展名决定：`.png`、`.bmp`、`.tga`、`.jpg/.jpeg`,
-  以及 `.pgm`（灰度）/ `.ppm` / `.pnm`（彩色）。默认 PNG。
-- 灰度图：直接对整幅做 AA。
-- 彩色图：取 BT.601 全范围亮度做 AA；色度不再走有损的 8 位 YUV 量化，
-  而是把「亮度变化量」加到原图 RGB 的三个通道上（等价于原脚本
-  ShufflePlanes 的「只换亮度、色度原样保留」，且色度无量化误差）。
+  以及 `.pgm`（灰度）/ `.ppm` / `.pnm`（彩色）。默认 PNG。省略 `-o` 时自动
+  生成为 `<输入名>_output.<输入扩展名>`（沿用输入格式）。
+- 灰度图：直接在整幅上按顺序执行选中的步骤。
+- 彩色图：取 BT.601 全范围亮度做处理；色度不走有损的 8 位 YUV 量化，而是把
+  「亮度变化量」加到原图 RGB 的三个通道上（等价于原脚本 ShufflePlanes
+  的「只换亮度、色度原样保留」，且色度无量化误差）。
 - 尺寸要求：宽和高都 ≥ 8（EEDI2 两遍转置后的隐含约束），输出与输入同尺寸。
 
-### 可选参数（默认值与原脚本一致）
+### 处理步骤
 
-| 参数 | 含义 | 默认 |
-|---|---|---|
-| `--mthresh N` | 运动（边缘掩码）阈值 | 10 |
-| `--lthresh N` | 线性插值阈值 | 20 |
-| `--vthresh N` | 方差阈值 | 20 |
-| `--maxd N` | 最大搜索距离，1..29 | 24 |
-| `--nt N` | 噪声阈值 | 50 |
-| `--field N` | 场奇偶，0 或 1 | 1 |
-| `--repair N` | 2 = 启用 Repair(模式2)；0 = 禁用 | 2 |
-| `-h` / `--help` | 帮助 | — |
+| 参数 | 含义 |
+|---|---|
+| `--aa` | 去锯齿：EEDI2 链（两遍方向插值 + spline36 重采样）+ Repair 模式 2，参数固定 |
+| `--denoise N` | NLMeans 降噪，`N` 为滤波强度 `h`（> 0）|
+
+步骤按命令行出现顺序依次执行，每一步都在前一步的结果上继续；`--aa` 与
+`--denoise` 均可省略、可重复、顺序任意。全部省略则输出与输入相同。
 
 示例：
 
 ```
-out/aa.exe -i clip.png -o clip_aa.png
-out/aa.exe -i in.bmp -o out.png --maxd 32 --nt 30
-out/aa.exe -i gray.pgm -o gray_aa.pgm --repair 0
+out/aa.exe -i clip.png --aa                       # -> clip_output.png
+out/aa.exe -i in.png --denoise 5                  # -> in_output.png
+out/aa.exe -i in.png -o out.png --denoise 5 --aa
+out/aa.exe -i in.png -o out.png --aa --denoise 3
 ```
 
 ## 编译
 
 任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`
-（main / eedi2 / resample / repair / imageio），构建产物输出到 `out/`：
+（main / eedi2 / resample / repair / imageio / nlmeans），构建产物输出到 `out/`：
 
 VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run Build Task`），
 会自动创建 `out/` 目录再编译。
@@ -78,14 +84,14 @@ x86_64 版本，解压后把 `bin` 目录加进 PATH），编译时用 `--target
 
 ```
 clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
-    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp
+    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
 ```
 
 或者直接用 MinGW-w64 自带的 g++：
 
 ```
 g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
 ```
 
 没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
@@ -93,7 +99,7 @@ g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 ```
 python -m pip install ziglang
 python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
 ```
 
 ## 实现要点
@@ -106,6 +112,12 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
   （像素中心对齐），spline36 核按 `max(ratio,1)` 缩放、按权值总和归一化。
 - **Repair 模式 2**：对每个像素取参考图 b 的 3×3 邻域排序后的
   `clamp(a, n[1], n[7])`，边界行列直接复制 a。
+- **NLMeans**（vs-nlm-ispc / KNLMeansCL drop-in 的移植，参数固定 d=0、a=2、
+  s=4、wmode=3、wref=1）：单帧空间降噪（d=0 不用时间邻域）。对 patch 上三角
+  半区 12 个偏移逐像素求 `3·Δ²/255²`，经水平 9-tap、竖直 9-tap 滑动盒得到
+  窗口距离 `d²`，权重 `w = max(1 - d²·κ, 0)⁸`，其中
+  `κ = 255² / (3·h²·81)`，h 由 `--denoise` 提供；聚合 `Σw` 与 `Σw·v` 后输出
+  `(wref·maxw·src + Σw·v) / (wref·maxw + Σw)`。
 
 ## 验证
 
@@ -118,8 +130,10 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 | Repair（模式2，8bit） | 与 RemoveGrainVS.dll 输出直接比 | 100% 逐像素一致 |
 | spline36 重采样 | 与 fmtconv 16bit 输出 >>8 比 | 100% 像素差 ≤1 |
 | 整条 AA 链 | VS 全程 16bit >>8 vs 本工具 8bit | 100% 像素差 ≤2，99.9% ≤1 |
+| NLMeans（8bit） | 与 nlm_ispc.dll（d=0,a=2,s=4,wmode=3,wref=1）直接比 | 100% 逐像素一致 |
 
 剩余 ±1..2 是「本工具全程 8bit 取整」与「VS 在 16bit 中间精度下计算再截断」
 之间的正常差异（fmtconv 强制 16bit 中间精度）。彩色路径用 PPM 测试卡验证：
 色块往返零误差（实测 1000 个随机色全数精确；唯一例外是亮度恰为 x.5 的
 0.1% 颜色，会三通道整体 +1），对角线硬边出现中间过渡色（AA 生效）。
+NLMeans 逐字节对比在 h=3/5/8 及 21×18～96×72 多尺寸噪声图/干净图上均成立。

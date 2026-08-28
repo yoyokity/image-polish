@@ -36,6 +36,7 @@
 #include "common.h"
 #include "eedi2.h"
 #include "imageio.h"
+#include "nlmeans.h"
 #include "repair.h"
 #include "resample.h"
 
@@ -97,44 +98,69 @@ static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vec
 }
 
 // ---------------------------------------------------------------------------
+// Processing steps, applied to the luma plane in command-line order
+// ---------------------------------------------------------------------------
+struct Step {
+    bool  aa;      // true: anti-aliasing (fixed params); false: NLMeans denoise
+    float h;       // NLMeans strength for denoise steps
+};
+
+// Anti-aliasing step: the EEDI2 chain plus Repair(2), parameters fixed to the
+// defaults matching the original script.
+static void aaStep(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
+{
+    std::vector<u8> ref = plane;                    // Repair reference = pre-AA luma
+    std::vector<u8> aa;
+    aaChain(plane.data(), w, h, p, aa);
+    repair2(aa.data(), ref.data(), w, h, aa.data());
+    plane = std::move(aa);
+}
+
+static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int w, int h,
+                     const std::vector<Step> &steps)
+{
+    for (const Step &st : steps) {
+        if (st.aa) {
+            aaStep(p, plane, w, h);
+        } else {
+            NlmeansParams np;               // fixed config: a=2, s=4, wmode=3, wref=1
+            np.h = st.h;
+            std::vector<u8> out(std::size_t(w) * h);
+            nlmeans(plane.data(), w, h, np, out.data());
+            plane = std::move(out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 static void printHelp()
 {
     std::printf(
-        "aa.exe - EEDI2 anti-aliasing (port of the VapourSynth eedi2+fmtc+repair chain)\n"
+        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise\n"
         "\n"
-        "Usage: aa.exe -i <input> -o <output> [options]\n"
+        "Usage: aa.exe -i <input> [-o <output>] [--aa] [--denoise <h>]\n"
         "\n"
-        "  -i, --input  <file>   input image (PNG/BMP/PNM/TGA, gray or RGB)\n"
-        "  -o, --output <file>   output image (format from extension: PNG/BMP/TGA/JPG)\n"
+        "  -i, --input <file>    input image (PNG/BMP/PNM/TGA, gray or RGB)\n"
+        "  -o, --output <file>   output image (format from extension);\n"
+        "                        omitted: <input basename>_output.<same ext>\n"
+        "  --aa                  anti-aliasing (EEDI2 chain, parameters fixed)\n"
+        "  --denoise <h>         NLMeans denoise, <h> is the filter strength\n"
         "\n"
-        "Options (defaults match the original script):\n"
-        "  --mthresh N    motion threshold         (10)\n"
-        "  --lthresh N    linear interpolation th. (20)\n"
-        "  --vthresh N    variance threshold       (20)\n"
-        "  --maxd N       max edge search distance (24)\n"
-        "  --nt N         noise threshold          (50)\n"
-        "  --field N      field parity, 0 or 1     (1)\n"
-        "  --repair N     Repair mode: 2 (default), 0 disables repair\n"
-        "  -h, --help     show this help\n"
+        "Steps are executed in the order they appear on the command line;\n"
+        "with no step the image is passed through unchanged.\n"
         "\n"
         "Examples:\n"
-        "  aa.exe -i clip.png -o clip_aa.png\n"
-        "  aa.exe -i in.bmp -o out.bmp --maxd 32 --nt 30\n");
-}
-
-static int parseInt(const char *s)
-{
-    return std::atoi(s);
+        "  aa.exe -i in.png --denoise 5 --aa\n"
+        "  aa.exe -i in.png -o out.png --aa --denoise 3\n");
 }
 
 int main(int argc, char **argv)
 {
     std::string input, output;
     std::string dumpEedi2, dumpRs;
-    Eedi2Params p;
-    int repairMode = 2;
+    std::vector<Step> steps;
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -147,13 +173,8 @@ int main(int argc, char **argv)
         };
         if (a == "-i" || a == "--input") input = next("-i");
         else if (a == "-o" || a == "--output") output = next("-o");
-        else if (a == "--mthresh") p.mthresh = parseInt(next("--mthresh"));
-        else if (a == "--lthresh") p.lthresh = parseInt(next("--lthresh"));
-        else if (a == "--vthresh") p.vthresh = parseInt(next("--vthresh"));
-        else if (a == "--maxd") p.maxd = parseInt(next("--maxd"));
-        else if (a == "--nt") p.nt = parseInt(next("--nt"));
-        else if (a == "--field") p.field = parseInt(next("--field"));
-        else if (a == "--repair") repairMode = parseInt(next("--repair"));
+        else if (a == "--aa") steps.push_back({true, 0.0f});
+        else if (a == "--denoise") steps.push_back({false, static_cast<float>(std::atof(next("--denoise")))});
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
         else if (a == "-h" || a == "--help") { printHelp(); return 0; }
@@ -164,20 +185,26 @@ int main(int argc, char **argv)
         }
     }
 
-    if (input.empty() || output.empty()) {
-        std::fprintf(stderr, "error: -i and -o are required\n");
+    if (input.empty()) {
+        std::fprintf(stderr, "error: -i is required\n");
         printHelp();
         return 1;
     }
 
-    if (p.maxd < 1 || p.maxd > 29) {
-        std::fprintf(stderr, "error: maxd must be in 1..29\n");
-        return 1;
+    if (output.empty()) {
+        // default: <input basename>_output.<same extension>
+        const auto pos = input.find_last_of('.');
+        if (pos == std::string::npos)
+            output = input + "_output";
+        else
+            output = input.substr(0, pos) + "_output" + input.substr(pos);
     }
-    if (p.field != 0 && p.field != 1) {
-        std::fprintf(stderr, "error: field must be 0 or 1\n");
-        return 1;
-    }
+
+    for (const Step &st : steps)
+        if (!st.aa && st.h <= 0.0f) {
+            std::fprintf(stderr, "error: --denoise h must be positive\n");
+            return 1;
+        }
 
     Image img;
     if (!loadImage(input, img)) {
@@ -189,6 +216,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    Eedi2Params p;                       // fixed AA parameters (script defaults)
     eedi2_prepare(p);
 
     if (!dumpEedi2.empty() && !dumpRs.empty()) {
@@ -235,28 +263,18 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    std::vector<u8> lumaAA;
-    std::vector<u8> grayRef;
-    if (img.ch == 1) {
-        grayRef = img.p;
-        aaChain(img.p.data(), img.w, img.h, p, lumaAA);
-    } else {
-        std::vector<u8> y;
-        rgbLuma(img.p.data(), img.w * img.h, y);
-        grayRef = y;
-        aaChain(y.data(), img.w, img.h, p, lumaAA);
-        if (repairMode != 0)
-            repair2(lumaAA.data(), grayRef.data(), img.w, img.h, lumaAA.data());
-        std::vector<u8> rgb;
-        applyLuma(lumaAA, img.p.data(), img.w * img.h, rgb);   // img.p is still the original RGB
-        img.p = std::move(rgb);
+    if (!steps.empty()) {
+        if (img.ch == 1) {
+            runSteps(p, img.p, img.w, img.h, steps);
+        } else {
+            std::vector<u8> y;
+            rgbLuma(img.p.data(), img.w * img.h, y);
+            runSteps(p, y, img.w, img.h, steps);
+            std::vector<u8> rgb;
+            applyLuma(y, img.p.data(), img.w * img.h, rgb);   // img.p is still the original RGB
+            img.p = std::move(rgb);
+        }
     }
-
-    if (img.ch == 1 && repairMode != 0)
-        repair2(lumaAA.data(), grayRef.data(), img.w, img.h, lumaAA.data());
-
-    if (img.ch == 1)
-        img.p = std::move(lumaAA);
 
     if (!saveImage(output, img)) {
         std::fprintf(stderr, "error: cannot write image '%s'\n", output.c_str());
