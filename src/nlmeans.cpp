@@ -1,5 +1,7 @@
 #include "nlmeans.h"
 
+#include "pfor.h"
+
 #if defined(__clang__)
 #pragma clang fp contract(off)   // keep the port bit-identical to the reference
 #endif
@@ -37,6 +39,10 @@ inline float weight(int wmode, float t)
 } // namespace
 
 // NLMeans with vs-nlm-ispc semantics, d = 0 (single frame), channels = "Y".
+// Threading: the four per-pixel stages are split by rows; the vertical box is
+// the reference's rolling window, kept column-major per column (the operation
+// sequence inside a column is identical to the serial version, so the output
+// stays bit-identical) and parallelized over columns.
 void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
 {
     const int a = p.a;
@@ -58,7 +64,6 @@ void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
     std::vector<float> max_weightp(size, std::numeric_limits<float>::epsilon());
     std::vector<float> temp(size);                                           // horizontal box result
     std::vector<float> temp_bwd(size);                                       // distances, later weights
-    std::vector<float> buffer(w);                                            // vertical box accumulator
 
     // iterate the upper-left half of the patch (mirror offsets are folded into
     // the accumulation, the center is handled by wref in the finish step)
@@ -68,7 +73,7 @@ void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
                 continue;
 
             // 1. per-pixel squared difference vs the neighbour at (ox, oy)
-            for (int y = 0; y < h; y++) {
+            parallelFor(0, h, [&](int y) {
                 const int ny = clampY(y + oy, h);
                 for (int x = 0; x < w; x++) {
                     const float u1 = srcf[y * stride + x];
@@ -76,52 +81,47 @@ void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
                     const float d = u1 - u1_pq;
                     temp_bwd[y * stride + x] = 3.0f * (d * d) * sq_inv_divisor;
                 }
-            }
+            });
 
             // 2. horizontal box sum over j in [-s, s]
-            for (int y = 0; y < h; y++) {
+            parallelFor(0, h, [&](int y) {
                 for (int x = 0; x < w; x++) {
                     float sum = 0.0f;
                     for (int j = -s; j <= s; j++)
                         sum += temp_bwd[y * stride + clampX(x + j, w)];
                     temp[y * stride + x] = sum;
                 }
-            }
+            });
 
             // 3. vertical box sum over the same radius, then map to a weight.
             // The sliding window folds the top edge over row 0 exactly like
-            // the reference, so the result is bit-identical to the plugin.
-            for (int x = 0; x < w; x++)
-                buffer[x] = s * temp[x];
-            for (int y = 0; y < s; y++)
-                for (int x = 0; x < w; x++)
-                    buffer[x] += temp[clampY(y, h) * stride + x];
-            for (int y = 0; y < std::min(s, h); y++) {
-                for (int x = 0; x < w; x++) {
-                    buffer[x] += temp[clampY(y + s, h) * stride + x];
-                    temp_bwd[y * stride + x] = weight(p.wmode, buffer[x] * h2_inv_norm);
-                    buffer[x] -= temp[x];                       // NB: row 0, as in the reference
+            // the reference; reordered column-major so the per-column rolling
+            // sequence is unchanged and columns run in parallel.
+            parallelFor(0, w, [&](int x) {
+                float b = s * temp[x];
+                for (int y = 0; y < s; y++)
+                    b += temp[clampY(y, h) * stride + x];
+                for (int y = 0; y < std::min(s, h); y++) {
+                    b += temp[clampY(y + s, h) * stride + x];
+                    temp_bwd[y * stride + x] = weight(p.wmode, b * h2_inv_norm);
+                    b -= temp[x];                       // NB: row 0, as in the reference
                 }
-            }
-            if (h > s) {
-                for (int y = s; y < h - s; y++) {
-                    for (int x = 0; x < w; x++) {
-                        buffer[x] += temp[(y + s) * stride + x];
-                        temp_bwd[y * stride + x] = weight(p.wmode, buffer[x] * h2_inv_norm);
-                        buffer[x] -= temp[(y - s) * stride + x];
+                if (h > s) {
+                    for (int y = s; y < h - s; y++) {
+                        b += temp[(y + s) * stride + x];
+                        temp_bwd[y * stride + x] = weight(p.wmode, b * h2_inv_norm);
+                        b -= temp[(y - s) * stride + x];
+                    }
+                    for (int y = std::max(h - s, s); y < h; y++) {
+                        b += temp[clampY(y + s, h) * stride + x];
+                        temp_bwd[y * stride + x] = weight(p.wmode, b * h2_inv_norm);
+                        b -= temp[(y - s) * stride + x];
                     }
                 }
-                for (int y = std::max(h - s, s); y < h; y++) {
-                    for (int x = 0; x < w; x++) {
-                        buffer[x] += temp[clampY(y + s, h) * stride + x];
-                        temp_bwd[y * stride + x] = weight(p.wmode, buffer[x] * h2_inv_norm);
-                        buffer[x] -= temp[(y - s) * stride + x];
-                    }
-                }
-            }
+            });
 
             // 4. accumulate the offset and its mirror
-            for (int y = 0; y < h; y++) {
+            parallelFor(0, h, [&](int y) {
                 const int ry1 = clampY(y + oy, h);
                 const int ry0 = clampY(y - oy, h);
                 for (int x = 0; x < w; x++) {
@@ -135,12 +135,12 @@ void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
                     const float u1_mq = srcf[ry0 * stride + clampX(x - ox, w)];
                     wdstp[idx] += u4 * u1_pq + u4_mq * u1_mq;
                 }
-            }
+            });
         }
     }
 
     // 5. finish: blend with the reference (current pixel) weight
-    for (int y = 0; y < h; y++) {
+    parallelFor(0, h, [&](int y) {
         for (int x = 0; x < w; x++) {
             const int idx = y * stride + x;
             const float multiplier = p.wref * max_weightp[idx];
@@ -148,5 +148,5 @@ void nlmeans(const u8 *src, int w, int h, const NlmeansParams &p, u8 *dst)
             const int v = int(std::round((multiplier * srcf[idx] + wdstp[idx]) / denominator));
             dst[idx] = u8(std::max(0, std::min(255, v)));
         }
-    }
+    });
 }

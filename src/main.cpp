@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -156,7 +157,10 @@ static void parseResize(const char *s, int &rw, int &rh)
 static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
                      const std::vector<Step> &steps, std::vector<u8> *refRgb)
 {
+    int idx = 0;
     for (const Step &st : steps) {
+        const auto t0 = std::chrono::steady_clock::now();
+        char name[40];
         switch (st.kind) {
         case StepKind::AA:
             if (w < 8 || h < 8) {
@@ -164,6 +168,7 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
                 std::exit(1);
             }
             aaStep(p, plane, w, h);
+            std::snprintf(name, sizeof name, "AA");
             break;
         case StepKind::Denoise: {
             NlmeansParams np;               // fixed config: a=2, s=4, wmode=3, wref=1
@@ -171,6 +176,7 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
             std::vector<u8> out(std::size_t(w) * h);
             nlmeans(plane.data(), w, h, np, out.data());
             plane = std::move(out);
+            std::snprintf(name, sizeof name, "NLMeans h=%g", st.h);
             break;
         }
         case StepKind::Resize: {
@@ -195,21 +201,27 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
             }
             w = nw;
             h = nh;
+            std::snprintf(name, sizeof name, "Resize %dx%d", nw, nh);
             break;
         }
         case StepKind::Dehalo: {
             std::vector<u8> out(std::size_t(w) * h);
             fineDehalo(plane.data(), w, h, out.data());
             plane = std::move(out);
+            std::snprintf(name, sizeof name, "FineDehalo");
             break;
         }
         case StepKind::Sharpen: {
             std::vector<u8> out(std::size_t(w) * h);
             cas(plane.data(), w, h, st.h, out.data());
             plane = std::move(out);
+            std::snprintf(name, sizeof name, "CAS s=%g", st.h);
             break;
         }
         }
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        std::printf("  step %d  %-16s %8.2f ms\n", ++idx, name, ms);
     }
 }
 

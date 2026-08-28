@@ -1,5 +1,7 @@
 #include "resample.h"
 
+#include "pfor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -47,10 +49,10 @@ static void resampleAxis(const u8 *src, int srcLen, u8 *dst, int dstLen, double 
     }
 }
 
-// vertical resize of a w*srcH image to w*dstH
+// vertical resize of a w*srcH image to w*dstH; columns are independent
 void resampleV(const u8 *src, int w, int srcH, int dstH, double sy, u8 *dst)
 {
-    for (int x = 0; x < w; x++) {
+    parallelFor(0, w, [&](int x) {
         std::vector<u8> col(srcH);
         for (int y = 0; y < srcH; y++)
             col[y] = src[y * w + x];
@@ -58,14 +60,15 @@ void resampleV(const u8 *src, int w, int srcH, int dstH, double sy, u8 *dst)
         resampleAxis(col.data(), srcH, r.data(), dstH, sy);
         for (int y = 0; y < dstH; y++)
             dst[y * w + x] = r[y];
-    }
+    });
 }
 
 void transpose(const u8 *src, int w, int h, u8 *dst)
 {
-    for (int y = 0; y < h; y++)
+    parallelFor(0, h, [&](int y) {
         for (int x = 0; x < w; x++)
             dst[x * h + y] = src[y * w + x];
+    });
 }
 
 // resize a w*h image to nw*nh with the spline36 kernel, pixel centres

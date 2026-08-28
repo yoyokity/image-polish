@@ -1,5 +1,7 @@
 #include "dehalo.h"
 
+#include "pfor.h"
+
 #if defined(__clang__)
 #pragma clang fp contract(off)
 #endif
@@ -27,7 +29,7 @@ const int DY[8] = { -1, -1, -1, 0, 0, 1, 1, 1 };
 
 static void morpho(const u8 *src, int w, int h, const int mask[8], bool isMax, u8 *dst)
 {
-    for (int y = 0; y < h; y++) {
+    parallelFor(0, h, [&](int y) {
         for (int x = 0; x < w; x++) {
             int v = src[y * w + x];
             for (int k = 0; k < 8; k++) {
@@ -41,7 +43,7 @@ static void morpho(const u8 *src, int w, int h, const int mask[8], bool isMax, u
             }
             dst[y * w + x] = u8(v);
         }
-    }
+    });
 }
 
 // mt_expand_multi / mt_inpand_multi: mode 0 rectangle, 1 ellipse, 2 losange
@@ -77,7 +79,7 @@ static void convolve(const u8 *src, int w, int h, const int m[9], u8 *dst)
     long scale = 0;
     for (int k = 0; k < 9; k++)
         scale += m[k];
-    for (int y = 0; y < h; y++) {
+    parallelFor(0, h, [&](int y) {
         for (int x = 0; x < w; x++) {
             long s = 0;
             for (int ky = -1; ky <= 1; ky++) {
@@ -90,7 +92,7 @@ static void convolve(const u8 *src, int w, int h, const int m[9], u8 *dst)
             const double v = (scale != 0) ? double(s) / scale : double(s);
             dst[y * w + x] = u8(clamp255(rintE(v)));
         }
-    }
+    });
 }
 
 static void box3(const u8 *src, int w, int h, u8 *dst)
@@ -112,9 +114,13 @@ static void prewitt(const u8 *src, int w, int h, u8 *dst)
     convolve(src, w, h, m2, c2.data());
     convolve(src, w, h, m3, c3.data());
     convolve(src, w, h, m4, c4.data());
-    for (int i = 0; i < w * h; i++)
-        dst[i] = u8(std::max(std::max(int(c1[i]), int(c2[i])),
-                             std::max(int(c3[i]), int(c4[i]))));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            dst[i] = u8(std::max(std::max(int(c1[i]), int(c2[i])),
+                                 std::max(int(c3[i]), int(c4[i]))));
+        }
+    });
 }
 
 // ---- zimg-style separable resize (normalized) ----------------------------
@@ -140,7 +146,7 @@ static double lanczW(double d, double taps)
 
 enum class Kern { Bicubic, Lanczos };
 
-static int axis1D(const u8 *src, int N, int o, int n, Kern kern, double p1, double p2)
+static int axis1D(const u8 *src, int stride, int N, int o, int n, Kern kern, double p1, double p2)
 {
     const double pos = (o + 0.5) * (double(N) / n) - 0.5;
     const double support = (kern == Kern::Bicubic) ? 2.0 : p2;
@@ -151,7 +157,7 @@ static int axis1D(const u8 *src, int N, int o, int n, Kern kern, double p1, doub
         const double w = (kern == Kern::Bicubic) ? bicubW(std::fabs(pos - k), p1, p2)
                                                  : lanczW(std::fabs(pos - k), p2);
         const int kk = std::max(0, std::min(N - 1, k));
-        sum += w * src[kk];
+        sum += w * src[kk * stride];
         wsum += w;
     }
     if (wsum != 0.0)
@@ -162,16 +168,16 @@ static int axis1D(const u8 *src, int N, int o, int n, Kern kern, double p1, doub
 static void resizeSep(const u8 *src, int w, int h, int nw, int nh, Kern kern, double p1, double p2, u8 *dst)
 {
     std::vector<u8> tmp(std::size_t(nw) * h);
-    for (int y = 0; y < h; y++)
+    // horizontal pass: each output row independent
+    parallelFor(0, h, [&](int y) {
         for (int o = 0; o < nw; o++)
-            tmp[y * nw + o] = u8(axis1D(src + y * w, w, o, nw, kern, p1, p2));
-    for (int x = 0; x < nw; x++) {
-        std::vector<u8> col(h);
-        for (int y = 0; y < h; y++)
-            col[y] = tmp[y * nw + x];
-        for (int o = 0; o < nh; o++)
-            dst[o * nw + x] = u8(axis1D(col.data(), h, o, nh, kern, p1, p2));
-    }
+            tmp[y * nw + o] = u8(axis1D(src + y * w, 1, w, o, nw, kern, p1, p2));
+    });
+    // vertical pass: each output row reads only tmp (already complete)
+    parallelFor(0, nh, [&](int o) {
+        for (int x = 0; x < nw; x++)
+            dst[o * nw + x] = u8(axis1D(tmp.data() + x, nw, h, o, nh, kern, p1, p2));
+    });
 }
 
 static void resizeBicubic(const u8 *src, int w, int h, int nw, int nh, double b, double c, u8 *dst)
@@ -185,11 +191,15 @@ static void resizeLanczos(const u8 *src, int w, int h, int nw, int nh, u8 *dst)
 }
 
 // ---- MaskedMerge: linear blend weighted by the mask ----------------------
-static void maskedMerge(const u8 *a, const u8 *b, const u8 *mask, int n, u8 *dst)
+static void maskedMerge(const u8 *a, const u8 *b, const u8 *mask, int w, int h, u8 *dst)
 {
-    for (int i = 0; i < n; i++)
-        dst[i] = u8(clamp255(rintE((double(a[i]) * (255 - mask[i]) +
-                                    double(b[i]) * mask[i]) / 255.0)));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            dst[i] = u8(clamp255(rintE((double(a[i]) * (255 - mask[i]) +
+                                       double(b[i]) * mask[i]) / 255.0)));
+        }
+    });
 }
 
 static int m4(double x)
@@ -219,26 +229,37 @@ static void dehaloAlpha(const u8 *src, int w, int h, u8 *dst)
     std::vector<u8> mx(std::size_t(ox) * oy), mn(std::size_t(ox) * oy), are(std::size_t(ox) * oy);
     morpho(src, w, h, full, true, mx.data());
     morpho(src, w, h, full, false, mn.data());
-    for (int i = 0; i < ox * oy; i++)
-        are[i] = u8(clamp255(int(mx[i]) - int(mn[i])));
+    parallelFor(0, oy, [&](int y) {
+        for (int x = 0; x < ox; x++) {
+            const int i = y * ox + x;
+            are[i] = u8(clamp255(int(mx[i]) - int(mn[i])));
+        }
+    });
     morpho(halos.data(), ox, oy, full, true, mx.data());
     morpho(halos.data(), ox, oy, full, false, mn.data());
     std::vector<u8> ugly(std::size_t(ox) * oy);
-    for (int i = 0; i < ox * oy; i++)
-        ugly[i] = u8(clamp255(int(mx[i]) - int(mn[i])));
+    parallelFor(0, oy, [&](int y) {
+        for (int x = 0; x < ox; x++) {
+            const int i = y * ox + x;
+            ugly[i] = u8(clamp255(int(mx[i]) - int(mn[i])));
+        }
+    });
 
     // so = expr(ugly, are); whole expression in float, one final round
     std::vector<u8> so(std::size_t(ox) * oy);
-    for (int i = 0; i < ox * oy; i++) {
-        const double x = ugly[i], y = are[i];
-        const double t = (y - x) / (y + (y == 0 ? 1.0 : 0.0));
-        const double v = (t * 255.0 - 50.0) * ((y + 256.0) / 512.0 + 0.5);
-        so[i] = u8(clamp255(rintE(v)));
-    }
+    parallelFor(0, oy, [&](int y) {
+        for (int x = 0; x < ox; x++) {
+            const int i = y * ox + x;
+            const double u = ugly[i], a = are[i];
+            const double t = (a - u) / (a + (a == 0 ? 1.0 : 0.0));
+            const double v = (t * 255.0 - 50.0) * ((a + 256.0) / 512.0 + 0.5);
+            so[i] = u8(clamp255(rintE(v)));
+        }
+    });
 
     // lets = MaskedMerge(halos, src, so)
     std::vector<u8> lets(std::size_t(ox) * oy);
-    maskedMerge(halos.data(), src, so.data(), ox * oy, lets.data());
+    maskedMerge(halos.data(), src, so.data(), ox, oy, lets.data());
 
     // ss > 1: upsample to m4(ox*ss) x m4(oy*ss), min/max blend, downsample back
     const int upW = m4(ox * ss), upH = m4(oy * ss);
@@ -250,18 +271,28 @@ static void dehaloAlpha(const u8 *src, int w, int h, u8 *dst)
     resizeBicubic(mx.data(), ox, oy, upW, upH, 1.0 / 3.0, 1.0 / 3.0, maxL.data());
     morpho(lets.data(), ox, oy, full, false, mn.data());
     resizeBicubic(mn.data(), ox, oy, upW, upH, 1.0 / 3.0, 1.0 / 3.0, minL.data());
-    for (int i = 0; i < upW * upH; i++)
-        lower[i] = u8(std::min(int(up[i]), int(maxL[i])));
-    for (int i = 0; i < upW * upH; i++)
-        upper[i] = u8(std::max(int(lower[i]), int(minL[i])));
+    parallelFor(0, upH, [&](int yy) {
+        for (int xx = 0; xx < upW; xx++) {
+            const int i = yy * upW + xx;
+            lower[i] = u8(std::min(int(up[i]), int(maxL[i])));
+        }
+    });
+    parallelFor(0, upH, [&](int yy) {
+        for (int xx = 0; xx < upW; xx++) {
+            const int i = yy * upW + xx;
+            upper[i] = u8(std::max(int(lower[i]), int(minL[i])));
+        }
+    });
     std::vector<u8> remove(std::size_t(ox) * oy);
     resizeLanczos(upper.data(), upW, upH, ox, oy, remove.data());
 
     // them = expr(src, remove, 'x y < x x y - 1 * - x x y - 1 * - ?')
-    for (int i = 0; i < ox * oy; i++) {
-        const int x = src[i], y = remove[i];
-        dst[i] = u8(clamp255(x < y ? 2 * x - y : 2 * x - y));
-    }
+    parallelFor(0, oy, [&](int y) {
+        for (int x = 0; x < ox; x++) {
+            const int i = y * ox + x;
+            dst[i] = u8(clamp255(2 * int(src[i]) - int(remove[i])));
+        }
+    });
 }
 
 } // namespace
@@ -280,32 +311,52 @@ void fineDehalo(const u8 *src, int w, int h, u8 *dst)
     prewitt(src, w, h, edges.data());
 
     // strong = expr 'x thmi - (thma-thmi) / 255 *'
-    for (int i = 0; i < n; i++)
-        strong[i] = u8(clamp255(rintE((double(int(edges[i]) - thmi) / double(thma - thmi)) * 255.0)));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            strong[i] = u8(clamp255(rintE((double(int(edges[i]) - thmi) / double(thma - thmi)) * 255.0)));
+        }
+    });
     // large = expand rectangle rx x ry
     multiRec(strong.data(), w, h, rxI, ryI, 0, true, large.data());
 
     // light = expr 'x thlimi - (thlima-thlimi) / 255 *'
-    for (int i = 0; i < n; i++)
-        light[i] = u8(clamp255(rintE((double(int(edges[i]) - thlimi) / double(thlima - thlimi)) * 255.0)));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            light[i] = u8(clamp255(rintE((double(int(edges[i]) - thlimi) / double(thlima - thlimi)) * 255.0)));
+        }
+    });
     // shrink = expand ellipse, *4, inpand ellipse, 2x box3
     multiRec(light.data(), w, h, rxI, ryI, 1, true, shrink.data());
-    for (int i = 0; i < n; i++)
-        shrink[i] = u8(clamp255(int(shrink[i]) * 4));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++)
+            shrink[y * w + x] = u8(clamp255(int(shrink[y * w + x]) * 4));
+    });
     multiRec(shrink.data(), w, h, rxI, ryI, 1, false, sc1.data());
     box3(sc1.data(), w, h, sc2.data());
     box3(sc2.data(), w, h, shrink.data());
 
     // shr_med = max(strong, shrink)
-    for (int i = 0; i < n; i++)
-        shrMed[i] = u8(std::max(int(strong[i]), int(shrink[i])));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            shrMed[i] = u8(std::max(int(strong[i]), int(shrink[i])));
+        }
+    });
     // outside = (large - shr_med) * 2
-    for (int i = 0; i < n; i++)
-        outside[i] = u8(clamp255((int(large[i]) - int(shrMed[i])) * 2));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            outside[i] = u8(clamp255((int(large[i]) - int(shrMed[i])) * 2));
+        }
+    });
     box3(outside.data(), w, h, sc1.data());
-    for (int i = 0; i < n; i++)
-        outside[i] = u8(clamp255(int(sc1[i]) * 2));
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; x++)
+            outside[y * w + x] = u8(clamp255(int(sc1[y * w + x]) * 2));
+    });
 
     // dst = MaskedMerge(src, dehaloed, outside)
-    maskedMerge(src, dehaloed.data(), outside.data(), n, dst);
+    maskedMerge(src, dehaloed.data(), outside.data(), w, h, dst);
 }

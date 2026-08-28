@@ -1,10 +1,14 @@
 #include "repair.h"
 
+#include "pfor.h"
+
 #include <algorithm>
 #include <cstring>
 
 // Repair mode 2: clamp each pixel to [2nd smallest, 2nd largest] of the 3x3
 // neighbourhood of the reference clip (vs-removegrain repairvs.cpp semantics).
+// Row-parallel; the 3x3 extremes are computed with a two-pass selection
+// instead of a full sort (same values, cheaper).
 void repair2(const u8 *a, const u8 *b, int w, int h, u8 *out)
 {
     if (h < 3 || w < 3) {
@@ -14,7 +18,7 @@ void repair2(const u8 *a, const u8 *b, int w, int h, u8 *out)
     std::memcpy(out, a, sizeof(u8) * w);                                  // row 0
     std::memcpy(out + (h - 1) * w, a + (h - 1) * w, sizeof(u8) * w);      // row h-1
 
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *ap = a + y * w;
         const u8 *bpp = b + (y - 1) * w;
         const u8 *bpc = b + y * w;
@@ -30,10 +34,15 @@ void repair2(const u8 *a, const u8 *b, int w, int h, u8 *out)
                 int(bpc[x - 1]), int(bpc[x]), int(bpc[x + 1]),
                 int(bpn[x - 1]), int(bpn[x]), int(bpn[x + 1])
             };
-            std::sort(n, n + 9);
-            const int lo = n[1];
-            const int hi = n[7];
-            op[x] = u8(std::max(lo, std::min(int(ap[x]), hi)));
+            int lo1 = 256, lo2 = 256, hi1 = -1, hi2 = -1;
+            for (int k = 0; k < 9; k++) {
+                const int v = n[k];
+                if (v < lo1) { lo2 = lo1; lo1 = v; }
+                else if (v < lo2) { lo2 = v; }
+                if (v > hi1) { hi2 = hi1; hi1 = v; }
+                else if (v > hi2) { hi2 = v; }
+            }
+            op[x] = u8(std::max(lo2, std::min(int(ap[x]), hi2)));
         }
-    }
+    });
 }

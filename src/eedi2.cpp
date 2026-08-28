@@ -1,5 +1,7 @@
 #include "eedi2.h"
 
+#include "pfor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -35,15 +37,16 @@ void Eedi2::run(const u8 *src, int w, int h, u8 *out)
     const int H2 = h * 2;
     std::vector<u8> msk(std::size_t(w) * h), tmp(std::size_t(w) * h), dst(std::size_t(w) * h);
 
-    // The 2x buffers keep a padding frame(2 rows above + 2 left bytes) so that
-    // the stride-contiguous reads at x=0 / x=w-1 (which in the reference bleed
-    // into the neighbouring row) and postProcess's first-row backward read can
-    // be emulated without out-of-bounds access; pads are zeroed.
+    // The 2x buffers keep a padding frame(2 rows above + below + 2 left bytes)
+    // so that the stride-contiguous reads at x=0 / x=w-1 (which in the reference
+    // bleed into the neighbouring row) and the last-row backward/forward reads
+    // (postProcess's first row, interpolateLattice's row+1 at the bottom edge)
+    // can be emulated without out-of-bounds access; pads are zeroed.
     const size_t padRow = 2u * stride, padCol = 2u;
     struct Buf2 {
         void alloc(int w, int H2, size_t padRow, size_t padCol)
         {
-            base.assign(std::size_t(w) * H2 + padRow + padCol, 0);
+            base.assign(std::size_t(w) * H2 + 2 * padRow + padCol, 0);
             frame = base.data() + padRow + padCol;
         }
         std::vector<u8> base;
@@ -55,13 +58,21 @@ void Eedi2::run(const u8 *src, int w, int h, u8 *out)
     tmp2_2.alloc(w, H2, padRow, padCol);
     msk2.alloc(w, H2, padRow, padCol);
 
-    buildEdgeMask(src, w, h, msk.data());
+    // calcDirections' direction search reads up to maxd columns past the row
+    // ends; at rows 0 / h-1 those would fall outside the input. The reference
+    // (VS frames) sees (usually zeroed) allocation padding there, so feed the
+    // stages a copy padded by one zero row above and below (stride stays w,
+    // so every in-bounds read keeps its exact value).
+    std::vector<u8> srcPad(std::size_t(w) * (h + 2), 0);
+    std::memcpy(srcPad.data() + w, src, sizeof(u8) * w * h);
+
+    buildEdgeMask(srcPad.data() + w, w, h, msk.data());
     erode(msk.data(), w, h, tmp.data());
     dilate(tmp.data(), w, h, msk.data());
     erode(msk.data(), w, h, tmp.data());
     removeSmallHorzGaps(tmp.data(), w, h, msk.data());
 
-    calcDirections(src, msk.data(), w, h, tmp.data());
+    calcDirections(srcPad.data() + w, msk.data(), w, h, tmp.data());
     filterDirMap(msk.data(), tmp.data(), w, h, dst.data());
     expandDirMap(msk.data(), dst.data(), w, h, tmp.data());
     filterMap(msk.data(), tmp.data(), w, h, dst.data());
@@ -69,7 +80,7 @@ void Eedi2::run(const u8 *src, int w, int h, u8 *out)
     std::fill(dst2.base.begin(), dst2.base.end(), 0);
     std::fill(tmp2_2.base.begin(), tmp2_2.base.end(), 0);
     std::fill(msk2.base.begin(), msk2.base.end(), 0);
-    upscaleBy2(src, w, h, dst2.frame);
+    upscaleBy2(srcPad.data() + w, w, h, dst2.frame);
     upscaleBy2(dst.data(), w, h, tmp2_2.frame);
     upscaleBy2(msk.data(), w, h, msk2.frame);
 
@@ -95,7 +106,7 @@ void Eedi2::buildEdgeMask(const u8 *src, int w, int h, u8 *msk)
 {
     std::memset(msk, 0, sizeof(u8) * w * h);
     const int stride = w;
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *pp = src + (y - 1) * stride;
         const u8 *pc = src + y * stride;
         const u8 *pn = src + (y + 1) * stride;
@@ -134,13 +145,13 @@ void Eedi2::buildEdgeMask(const u8 *src, int w, int h, u8 *msk)
             if (Ixx + Iyy >= d.lthresh)
                 m[x] = PEAK;
         }
-    }
+    });
 }
 
 void Eedi2::erode(const u8 *msk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, msk, sizeof(u8) * w * h);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *pp = msk + (y - 1) * w;
         const u8 *pc = msk + y * w;
         const u8 *pn = msk + (y + 1) * w;
@@ -160,13 +171,13 @@ void Eedi2::erode(const u8 *msk, int w, int h, u8 *dst)
             if (count < 2)   // estr = 2
                 o[x] = 0;
         }
-    }
+    });
 }
 
 void Eedi2::dilate(const u8 *msk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, msk, sizeof(u8) * w * h);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *pp = msk + (y - 1) * w;
         const u8 *pc = msk + y * w;
         const u8 *pn = msk + (y + 1) * w;
@@ -186,13 +197,13 @@ void Eedi2::dilate(const u8 *msk, int w, int h, u8 *dst)
             if (count >= 4)  // dstr = 4
                 o[x] = PEAK;
         }
-    }
+    });
 }
 
 void Eedi2::removeSmallHorzGaps(const u8 *msk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, msk, sizeof(u8) * w * h);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *pc = msk + y * w;
         u8 *o = dst + y * w;
         for (int x = 3; x < w - 3; x++) {
@@ -207,7 +218,7 @@ void Eedi2::removeSmallHorzGaps(const u8 *msk, int w, int h, u8 *dst)
                     o[x] = PEAK;
             }
         }
-    }
+    });
 }
 
 // ---- 2. direction map at original resolution --------------------------
@@ -215,7 +226,7 @@ void Eedi2::calcDirections(const u8 *src, const u8 *msk, int w, int h, u8 *dst)
 {
     const int stride = w;
     std::fill_n(dst, std::size_t(stride) * h, PEAK);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *src2p = src + (y - 2) * stride;
         const u8 *srcpp = src + (y - 1) * stride;
         const u8 *srcp  = src + y * stride;
@@ -333,14 +344,14 @@ void Eedi2::calcDirections(const u8 *src, const u8 *msk, int w, int h, u8 *dst)
                 dstp[x] = NEUTRAL;
             }
         }
-    }
+    });
 }
 
 // ---- 3. direction map cleaning (original resolution) -------------------
 void Eedi2::filterDirMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, dmsk, sizeof(u8) * w * h);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *mskp  = msk + y * w;
         const u8 *dmskpp = dmsk + (y - 1) * w;
         const u8 *dmskp  = dmsk + y * w;
@@ -386,13 +397,13 @@ void Eedi2::filterDirMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
 
             dstp[x] = u8(static_cast<int>(static_cast<float>(sum + mid) / (count + 1) + 0.5f));
         }
-    }
+    });
 }
 
 void Eedi2::expandDirMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, dmsk, sizeof(u8) * w * h);
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *mskp  = msk + y * w;
         const u8 *dmskpp = dmsk + (y - 1) * w;
         const u8 *dmskp  = dmsk + y * w;
@@ -433,14 +444,14 @@ void Eedi2::expandDirMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
 
             dstp[x] = u8(static_cast<int>(static_cast<float>(sum + mid) / (count + 1) + 0.5f));
         }
-    }
+    });
 }
 
 void Eedi2::filterMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
 {
     std::memcpy(dst, dmsk, sizeof(u8) * w * h);
     const int twleve = 12;
-    for (int y = 1; y < h - 1; y++) {
+    parallelFor(1, h - 1, [&](int y) {
         const u8 *mskp  = msk + y * w;
         const u8 *dmskpp = dmsk + (y - 1) * w;
         const u8 *dmskp  = dmsk + y * w;
@@ -499,30 +510,34 @@ void Eedi2::filterMap(const u8 *msk, const u8 *dmsk, int w, int h, u8 *dst)
                     dstp[x] = PEAK;
             }
         }
-    }
+    });
 }
 
 // ---- 4. 2x stage -------------------------------------------------------
 void Eedi2::upscaleBy2(const u8 *src, int w, int h, u8 *dst)
 {
-    for (int y = 0; y < h; y++)
-        std::memcpy(dst + (y * 2 + (1 - d.field)) * w, src + y * w, sizeof(u8) * w);
+    const int writeOffset = (1 - d.field) * w;
+    parallelFor(0, h, [&](int y) {
+        std::memcpy(dst + (y * 2) * w + writeOffset, src + y * w, sizeof(u8) * w);
+    });
 }
 
 // dmsk: direction map on even rows (upscaled), out: odd-row direction map
 void Eedi2::markDirections2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
     std::fill_n(dst, std::size_t(stride) * H2, PEAK);
 
-    const u8 *mskp  = msk + stride * (1 - field);
-    const u8 *dmskp = dmsk + stride * (1 - field);
-    u8 *dstp = dst + stride * (2 - field);
-    const u8 *mskpn = mskp + stride * 2;
-    const u8 *dmskpn = dmskp + stride * 2;
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *mskp  = msk + stride * (y - 1);
+        const u8 *dmskp = dmsk + stride * (y - 1);
+        u8 *dstp = dst + stride * y;
+        const u8 *mskpn = mskp + stride * 2;
+        const u8 *dmskpn = dmskp + stride * 2;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
         for (int x = 1; x < w - 1; x++) {
             if (mskp[x] != PEAK && mskpn[x] != PEAK)
                 continue;
@@ -567,29 +582,25 @@ void Eedi2::markDirections2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *d
 
             dstp[x] = u8(static_cast<int>(static_cast<float>(sum + mid) / (count + 1) + 0.5f));
         }
-
-        mskp += stride * 2;
-        mskpn += stride * 2;
-        dmskp += stride * 2;
-        dmskpn += stride * 2;
-        dstp += stride * 2;
-    }
+    });
 }
 
 void Eedi2::filterDirMap2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
     std::memcpy(dst, dmsk, sizeof(u8) * stride * H2);
 
-    const u8 *mskp  = msk + stride * (1 - field);
-    const u8 *dmskp = dmsk + stride * (2 - field);
-    u8 *dstp = dst + stride * (2 - field);
-    const u8 *mskpn = mskp + stride * 2;
-    const u8 *dmskpp = dmskp - stride * 2;
-    const u8 *dmskpn = dmskp + stride * 2;
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *mskp  = msk + stride * (y - 1);
+        const u8 *dmskp = dmsk + stride * y;
+        u8 *dstp = dst + stride * y;
+        const u8 *mskpn = mskp + stride * 2;
+        const u8 *dmskpp = dmskp - stride * 2;
+        const u8 *dmskpn = dmskp + stride * 2;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
         for (int x = 1; x < w - 1; x++) {
             if (mskp[x] != PEAK && mskpn[x] != PEAK)
                 continue;
@@ -637,30 +648,25 @@ void Eedi2::filterDirMap2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst
 
             dstp[x] = u8(static_cast<int>(static_cast<float>(sum + mid) / (count + 1) + 0.5f));
         }
-
-        mskp += stride * 2;
-        mskpn += stride * 2;
-        dmskpp += stride * 2;
-        dmskp += stride * 2;
-        dmskpn += stride * 2;
-        dstp += stride * 2;
-    }
+    });
 }
 
 void Eedi2::expandDirMap2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
     std::memcpy(dst, dmsk, sizeof(u8) * stride * H2);
 
-    const u8 *mskp  = msk + stride * (1 - field);
-    const u8 *dmskp = dmsk + stride * (2 - field);
-    u8 *dstp = dst + stride * (2 - field);
-    const u8 *mskpn = mskp + stride * 2;
-    const u8 *dmskpp = dmskp - stride * 2;
-    const u8 *dmskpn = dmskp + stride * 2;
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *mskp  = msk + stride * (y - 1);
+        const u8 *dmskp = dmsk + stride * y;
+        u8 *dstp = dst + stride * y;
+        const u8 *mskpn = mskp + stride * 2;
+        const u8 *dmskpp = dmskp - stride * 2;
+        const u8 *dmskpn = dmskp + stride * 2;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
         for (int x = 1; x < w - 1; x++) {
             if (dmskp[x] != PEAK || (mskp[x] != PEAK && mskpn[x] != PEAK))
                 continue;
@@ -703,36 +709,31 @@ void Eedi2::expandDirMap2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst
 
             dstp[x] = u8(static_cast<int>(static_cast<float>(sum + mid) / (count + 1) + 0.5f));
         }
-
-        mskp += stride * 2;
-        mskpn += stride * 2;
-        dmskpp += stride * 2;
-        dmskp += stride * 2;
-        dmskpn += stride * 2;
-        dstp += stride * 2;
-    }
+    });
 }
 
 void Eedi2::fillGaps2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
     std::memcpy(dst, dmsk, sizeof(u8) * stride * H2);
-
-    const u8 *mskp    = msk + stride * (1 - field);
-    const u8 *dmskp   = dmsk + stride * (2 - field);
-    u8 *dstp = dst + stride * (2 - field);
-    const u8 *mskpp   = mskp - stride * 2;
-    const u8 *mskpn   = mskp + stride * 2;
-    const u8 *mskpnn  = mskpn + stride * 2;
-    const u8 *dmskpp  = dmskp - stride * 2;
-    const u8 *dmskpn  = dmskp + stride * 2;
 
     const int eight = 8;
     const int fiveHundred = 500;
     const int twenty = 20;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *mskp    = msk + stride * (y - 1);
+        const u8 *dmskp   = dmsk + stride * y;
+        u8 *dstp = dst + stride * y;
+        const u8 *mskpp   = mskp - stride * 2;
+        const u8 *mskpn   = mskp + stride * 2;
+        const u8 *mskpnn  = mskpn + stride * 2;
+        const u8 *dmskpp  = dmskp - stride * 2;
+        const u8 *dmskpn  = dmskp + stride * 2;
+
         for (int x = 1; x < w - 1; x++) {
             if (dmskp[x] != PEAK || (mskp[x] != PEAK && mskpn[x] != PEAK))
                 continue;
@@ -800,37 +801,30 @@ void Eedi2::fillGaps2X(const u8 *msk, const u8 *dmsk, int w, int H2, u8 *dst)
                     dstp[u + j + 1] = u8(back + static_cast<int>(j * step + 0.5f));
             }
         }
-
-        mskpp += stride * 2;
-        mskp += stride * 2;
-        mskpn += stride * 2;
-        mskpnn += stride * 2;
-        dmskpp += stride * 2;
-        dmskp += stride * 2;
-        dmskpn += stride * 2;
-        dstp += stride * 2;
-    }
+    });
 }
 
 // The actual edge-directed interpolation: fills the odd rows of dst.
 void Eedi2::interpolateLattice(const u8 *omsk, u8 *dmsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
 
-    if (field)
+    if (d.field)
         std::memcpy(dst + stride * (H2 - 1), dst + stride * (H2 - 2), sizeof(u8) * w);
     else
         std::memcpy(dst, dst + stride, sizeof(u8) * w);
 
-    const u8 *omskp = omsk + stride * (1 - field);
-    u8 *dmskp = dmsk + stride * (2 - field);
-    u8 *dstp = dst + stride * (1 - field);
-    const u8 *omskn = omskp + stride * 2;
-    u8 *dstpn = dstp + stride;
-    const u8 *dstpnn = dstp + stride * 2;
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *omskp = omsk + stride * (y - 1);
+        u8 *dmskp = dmsk + stride * y;
+        u8 *dstp = dst + stride * (y - 1);
+        const u8 *omskn = omskp + stride * 2;
+        u8 *dstpn = dstp + stride;
+        const u8 *dstpnn = dstp + stride * 2;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
         for (int x = 0; x < w; x++) {
             int dir = dmskp[x];
             const int lim = maxLut2(dir);
@@ -939,40 +933,29 @@ void Eedi2::interpolateLattice(const u8 *omsk, u8 *dmsk, int w, int H2, u8 *dst)
                 dmskp[x] = (min == d.nt7) ? NEUTRAL : u8(NEUTRAL + (dir << 2));
             }
         }
-
-        omskp += stride * 2;
-        omskn += stride * 2;
-        dmskp += stride * 2;
-        dstp += stride * 2;
-        dstpn += stride * 2;
-        dstpnn += stride * 2;
-    }
+    });
 }
 
 void Eedi2::postProcess(const u8 *nmsk, const u8 *omsk, int w, int H2, u8 *dst)
 {
-    const int field = d.field;
     const int stride = w;
 
-    const u8 *nmskp = nmsk + stride * (2 - field);
-    const u8 *omskp = omsk + stride * (2 - field);
-    u8 *dstp = dst + stride * (2 - field);
-    const u8 *dstpp = dstp - stride;
-    const u8 *dstpn = dstp + stride;
+    const int yStart = 2 - d.field;
+    const int steps = (H2 - yStart) / 2;
+    parallelFor(0, steps, [&](int k) {
+        const int y = yStart + 2 * k;
+        const u8 *nmskp = nmsk + stride * y;
+        const u8 *omskp = omsk + stride * y;
+        u8 *dstp = dst + stride * y;
+        const u8 *dstpp = dstp - stride;
+        const u8 *dstpn = dstp + stride;
 
-    for (int y = 2 - field; y < H2 - 1; y += 2) {
         for (int x = 0; x < w; x++) {
             const int lim = maxLut2(int(nmskp[x]));
             if (std::abs(int(nmskp[x]) - int(omskp[x])) > lim && omskp[x] != PEAK && omskp[x] != NEUTRAL)
                 dstp[x] = u8((dstpp[x] + dstpn[x] + 1) / 2);
         }
-
-        nmskp += stride * 2;
-        omskp += stride * 2;
-        dstpp += stride * 2;
-        dstp += stride * 2;
-        dstpn += stride * 2;
-    }
+    });
 }
 
 int Eedi2::maxLut2(int dirMapValue) const
