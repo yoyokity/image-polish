@@ -32,6 +32,7 @@
                 "src/imageio.cpp",
                 "src/nlmeans.cpp",
                 "src/dehalo.cpp",
+                "src/cas.cpp",
                 "-o",
                 "out/aa.exe"
             ],

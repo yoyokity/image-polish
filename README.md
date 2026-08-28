@@ -55,7 +55,8 @@ out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
 | 参数 | 含义 |
 |---|---|
 | `--aa` | 去锯齿：EEDI2 链（两遍方向插值 + spline36 重采样）+ Repair 模式 2，参数固定 |
-| `--denoise N` | NLMeans 降噪，`N` 为滤波强度 `h`（> 0）|
+| `--denoise [N]` | NLMeans 降噪，`N` 为滤波强度 `h`（> 0，缺省 5）|
+| `--sharpen [s]` | CAS 锐化，`s` 为 sharpness（0.0..1.0，缺省 0.7）|
 | `--resize WxH` | 用 spline36 缩放（shift=0 中心对齐）；一侧可省略（`1920x` / `x1080`），另一侧按原宽高比计算 |
 | `--dehalo` | 去光晕：FineDehalo（havsfunc 默认参数，固定，不可自定义）|
 
@@ -76,7 +77,7 @@ out/aa.exe -i in.png -o out.png --denoise 5 --aa
 ## 编译
 
 任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`
-（main / eedi2 / resample / repair / imageio / nlmeans），构建产物输出到 `out/`：
+（main / eedi2 / resample / repair / imageio / nlmeans / dehalo / cas），构建产物输出到 `out/`：
 
 VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run Build Task`），
 会自动创建 `out/` 目录再编译。
@@ -96,7 +97,7 @@ clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
 
 ```
 g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp src/cas.cpp
 ```
 
 没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
@@ -104,7 +105,7 @@ g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 ```
 python -m pip install ziglang
 python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp src/cas.cpp
 ```
 
 ## 实现要点
@@ -134,6 +135,11 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
   扩张-腐蚀、3×3 盒卷积构造「排除区」，最后 `MaskedMerge` 只在掩码 255 处
   换成去晕结果。Expr 步骤按参考实现的逐运算 float + round-half-even(rint)
   语义复刻，输出钳位到 [0,255]。
+- **CAS**（HolyWu/VapourSynth-CAS 的移植，即 AMD FidelityFX CAS）：3×3 软
+  min/max 号出对比度自适应振幅 `amp = sqrt(clamp(min(mn, limit-mx)/mx))`，
+  权重 `w = amp · (-1/lerp(16,5,s))`，输出十字滤波
+  `((b+d+f+h)·w + e)/(1+4w)`；sharpness `s` 由 `--sharpen` 传入（0.0..1.0），
+  边界行列复制、左右边缘镜像第 1/倒数第 2 列，结果半上取整到 [0,255]。
 
 ## 验证
 
@@ -148,6 +154,7 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 | 整条 AA 链 | VS 全程 16bit >>8 vs 本工具 8bit | 100% 像素差 ≤2，99.9% ≤1 |
 | NLMeans（8bit） | 与 nlm_ispc.dll（d=0,a=2,s=4,wmode=3,wref=1）直接比 | 100% 逐像素一致 |
 | FineDehalo（8bit） | 与 havsfunc（全部默认参数）直接比 | 结构与掩码一致；光晕区像素差 ≤24，源于内部 resize 内核（Bicubic/Lanczos）的浮点细节差异 |
+| CAS（8bit） | 与 cas.dll（sharpness=0.7）直接比 | 99.3% 像素逐字节一致；其余像素差 ≤2（本机插件走 AVX2/AVX512 路径，中间和顺序重排所致）|
 
 剩余 ±1..2 是「本工具全程 8bit 取整」与「VS 在 16bit 中间精度下计算再截断」
 之间的正常差异（fmtconv 强制 16bit 中间精度）。彩色路径用 PPM 测试卡验证：

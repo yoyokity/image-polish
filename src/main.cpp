@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "common.h"
+#include "cas.h"
 #include "dehalo.h"
 #include "eedi2.h"
 #include "imageio.h"
@@ -103,7 +104,7 @@ static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vec
 // ---------------------------------------------------------------------------
 // Processing steps, applied to the luma plane in command-line order
 // ---------------------------------------------------------------------------
-enum class StepKind { AA, Denoise, Resize, Dehalo };
+enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen };
 
 struct Step {
     StepKind kind;
@@ -202,6 +203,12 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
             plane = std::move(out);
             break;
         }
+        case StepKind::Sharpen: {
+            std::vector<u8> out(std::size_t(w) * h);
+            cas(plane.data(), w, h, st.h, out.data());
+            plane = std::move(out);
+            break;
+        }
         }
     }
 }
@@ -220,7 +227,9 @@ static void printHelp()
         "  -o, --output <file>   output image (format from extension);\n"
         "                        omitted: <input basename>_output.<same ext>\n"
         "  --aa                  anti-aliasing (EEDI2 chain, parameters fixed)\n"
-        "  --denoise <h>         NLMeans denoise, <h> is the filter strength\n"
+        "  --denoise [<h>]        NLMeans denoise; <h> is the filter strength\n"
+        "                        (default 5)\n"
+        "  --sharpen [<s>]        CAS sharpening; <s> in 0.0..1.0 (default 0.7)\n"
         "  --resize <W>x<H>      resize with spline36; one side may be omitted\n"
         "                        (1920x or x1080, the other side is proportional)\n"
         "  --dehalo              dehalo (FineDehalo, havsfunc defaults, fixed)\n"
@@ -252,8 +261,17 @@ int main(int argc, char **argv)
         if (a == "-i" || a == "--input") input = next("-i");
         else if (a == "-o" || a == "--output") output = next("-o");
         else if (a == "--aa") steps.push_back({StepKind::AA, 0.0f, -1, -1});
-        else if (a == "--denoise") steps.push_back({StepKind::Denoise, static_cast<float>(std::atof(next("--denoise"))), -1, -1});
-        else if (a == "--resize") {
+        else if (a == "--denoise") {
+            float hv = 5.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                hv = static_cast<float>(std::atof(argv[++i]));
+            steps.push_back({StepKind::Denoise, hv, -1, -1});
+        } else if (a == "--sharpen") {
+            float sv = 0.7f;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                sv = static_cast<float>(std::atof(argv[++i]));
+            steps.push_back({StepKind::Sharpen, sv, -1, -1});
+        } else if (a == "--resize") {
             int rw = 0, rh = 0;
             parseResize(next("--resize"), rw, rh);
             steps.push_back({StepKind::Resize, 0.0f, rw, rh});
@@ -284,11 +302,16 @@ int main(int argc, char **argv)
             output = input.substr(0, pos) + "_output" + input.substr(pos);
     }
 
-    for (const Step &st : steps)
+    for (const Step &st : steps) {
         if (st.kind == StepKind::Denoise && st.h <= 0.0f) {
             std::fprintf(stderr, "error: --denoise h must be positive\n");
             return 1;
         }
+        if (st.kind == StepKind::Sharpen && (st.h < 0.0f || st.h > 1.0f)) {
+            std::fprintf(stderr, "error: --sharpen must be in 0.0..1.0\n");
+            return 1;
+        }
+    }
 
     Image img;
     if (!loadImage(input, img)) {
