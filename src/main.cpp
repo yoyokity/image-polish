@@ -40,35 +40,35 @@
 #include "resample.h"
 
 // ---------------------------------------------------------------------------
-// Color helpers (BT.601 full-range YUV444 as the "planes" of an image)
+// Color helpers (BT.601 luma; chroma of the original image is kept exact)
 // ---------------------------------------------------------------------------
 static inline u8 clamp8(int v) { return u8(std::max(0, std::min(255, v))); }
 
-static void rgbToYuv(const u8 *rgb, int n, std::vector<u8> &y, std::vector<u8> &u, std::vector<u8> &v)
+// BT.601 full-range luma of an RGB image (8-bit).
+static void rgbLuma(const u8 *rgb, int n, std::vector<u8> &y)
 {
-    y.resize(n); u.resize(n); v.resize(n);
+    y.resize(n);
     for (int i = 0; i < n; i++) {
         const double R = rgb[3 * i + 0], G = rgb[3 * i + 1], B = rgb[3 * i + 2];
-        const double Y = 0.299 * R + 0.587 * G + 0.114 * B;
-        // full-range BT.601 Cb/Cr, matched with the inverse below
-        y[i] = clamp8(int(Y + 0.5));
-        u[i] = clamp8(int((B - Y) / 1.772 + 128.0 + 0.5));
-        v[i] = clamp8(int((R - Y) / 1.402 + 128.0 + 0.5));
+        y[i] = clamp8(int(0.299 * R + 0.587 * G + 0.114 * B + 0.5));
     }
 }
 
-static void yuvToRgb(const std::vector<u8> &y, const std::vector<u8> &u, const std::vector<u8> &v, std::vector<u8> &rgb)
+// Reconstruct RGB after the luma-only AA pass: keep the original chroma by
+// adding the luma change (yAA - yOrig) to every channel of the original pixel.
+// This is exactly "replace luma, keep chroma" with unquantized chroma, i.e.
+// the same semantics as the VapourSynth ShufflePlanes([aa, src], YUV) chain;
+// flat regions roundtrip with zero error (only the rare yOrig == x.5 case
+// shifts all channels by +1).
+static void applyLuma(const std::vector<u8> &yAA, const u8 *origRgb, int n, std::vector<u8> &rgb)
 {
-    const int n = int(y.size());
     rgb.resize(std::size_t(n) * 3);
     for (int i = 0; i < n; i++) {
-        const double Y = y[i], U = int(u[i]) - 128, V = int(v[i]) - 128;
-        int R = int(Y + 1.402 * V + 0.5);
-        int G = int(Y - 0.344136 * U - 0.714136 * V + 0.5);
-        int B = int(Y + 1.772 * U + 0.5);
-        rgb[3 * i + 0] = clamp8(R);
-        rgb[3 * i + 1] = clamp8(G);
-        rgb[3 * i + 2] = clamp8(B);
+        const double R = origRgb[3 * i + 0], G = origRgb[3 * i + 1], B = origRgb[3 * i + 2];
+        const double d = double(yAA[i]) - (0.299 * R + 0.587 * G + 0.114 * B);
+        rgb[3 * i + 0] = clamp8(int(R + d + 0.5));
+        rgb[3 * i + 1] = clamp8(int(G + d + 0.5));
+        rgb[3 * i + 2] = clamp8(int(B + d + 0.5));
     }
 }
 
@@ -194,9 +194,9 @@ int main(int argc, char **argv)
     if (!dumpEedi2.empty() && !dumpRs.empty()) {
         // debug: dump the first EEDI2 pass (w x 2h raw gray8) and its
         // resampleV result (w x h raw gray8) for comparison with eedi2/fmtc
-        std::vector<u8> y, u, v;
+        std::vector<u8> y;
         if (img.ch == 3)
-            rgbToYuv(img.p.data(), img.w * img.h, y, u, v);
+            rgbLuma(img.p.data(), img.w * img.h, y);
         else
             y = img.p;
         Eedi2 eedi2(p);
@@ -219,9 +219,9 @@ int main(int argc, char **argv)
 
     if (!dumpEedi2.empty()) {
         // debug: dump the first EEDI2 pass (w x 2h raw gray8) for comparison
-        std::vector<u8> y, u, v;
+        std::vector<u8> y;
         if (img.ch == 3)
-            rgbToYuv(img.p.data(), img.w * img.h, y, u, v);
+            rgbLuma(img.p.data(), img.w * img.h, y);
         else
             y = img.p;
         Eedi2 eedi2(p);
@@ -241,14 +241,14 @@ int main(int argc, char **argv)
         grayRef = img.p;
         aaChain(img.p.data(), img.w, img.h, p, lumaAA);
     } else {
-        std::vector<u8> y, u, v;
-        rgbToYuv(img.p.data(), img.w * img.h, y, u, v);
+        std::vector<u8> y;
+        rgbLuma(img.p.data(), img.w * img.h, y);
         grayRef = y;
         aaChain(y.data(), img.w, img.h, p, lumaAA);
         if (repairMode != 0)
             repair2(lumaAA.data(), grayRef.data(), img.w, img.h, lumaAA.data());
         std::vector<u8> rgb;
-        yuvToRgb(lumaAA, u, v, rgb);
+        applyLuma(lumaAA, img.p.data(), img.w * img.h, rgb);   // img.p is still the original RGB
         img.p = std::move(rgb);
     }
 
