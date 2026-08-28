@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "common.h"
+#include "dehalo.h"
 #include "eedi2.h"
 #include "imageio.h"
 #include "nlmeans.h"
@@ -102,7 +103,7 @@ static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vec
 // ---------------------------------------------------------------------------
 // Processing steps, applied to the luma plane in command-line order
 // ---------------------------------------------------------------------------
-enum class StepKind { AA, Denoise, Resize };
+enum class StepKind { AA, Denoise, Resize, Dehalo };
 
 struct Step {
     StepKind kind;
@@ -195,6 +196,12 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
             h = nh;
             break;
         }
+        case StepKind::Dehalo: {
+            std::vector<u8> out(std::size_t(w) * h);
+            fineDehalo(plane.data(), w, h, out.data());
+            plane = std::move(out);
+            break;
+        }
         }
     }
 }
@@ -216,6 +223,7 @@ static void printHelp()
         "  --denoise <h>         NLMeans denoise, <h> is the filter strength\n"
         "  --resize <W>x<H>      resize with spline36; one side may be omitted\n"
         "                        (1920x or x1080, the other side is proportional)\n"
+        "  --dehalo              dehalo (FineDehalo, havsfunc defaults, fixed)\n"
         "\n"
         "Steps are executed in the order they appear on the command line;\n"
         "with no step the image is passed through unchanged.\n"
@@ -250,6 +258,7 @@ int main(int argc, char **argv)
             parseResize(next("--resize"), rw, rh);
             steps.push_back({StepKind::Resize, 0.0f, rw, rh});
         }
+        else if (a == "--dehalo") steps.push_back({StepKind::Dehalo, 0.0f, -1, -1});
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
         else if (a == "-h" || a == "--help") { printHelp(); return 0; }

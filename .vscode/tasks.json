@@ -31,6 +31,7 @@
                 "src/repair.cpp",
                 "src/imageio.cpp",
                 "src/nlmeans.cpp",
+                "src/dehalo.cpp",
                 "-o",
                 "out/aa.exe"
             ],

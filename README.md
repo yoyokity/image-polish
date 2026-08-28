@@ -57,6 +57,7 @@ out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
 | `--aa` | 去锯齿：EEDI2 链（两遍方向插值 + spline36 重采样）+ Repair 模式 2，参数固定 |
 | `--denoise N` | NLMeans 降噪，`N` 为滤波强度 `h`（> 0）|
 | `--resize WxH` | 用 spline36 缩放（shift=0 中心对齐）；一侧可省略（`1920x` / `x1080`），另一侧按原宽高比计算 |
+| `--dehalo` | 去光晕：FineDehalo（havsfunc 默认参数，固定，不可自定义）|
 
 步骤按命令行出现顺序依次执行，每一步都在前一步的结果上继续；各步骤均可
 省略、可重复、顺序任意。全部省略则输出与输入相同。彩色图缩放时色度用同一
@@ -87,14 +88,15 @@ x86_64 版本，解压后把 `bin` 目录加进 PATH），编译时用 `--target
 
 ```
 clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
-    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
+    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp \
+    src/nlmeans.cpp src/dehalo.cpp
 ```
 
 或者直接用 MinGW-w64 自带的 g++：
 
 ```
 g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp
 ```
 
 没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
@@ -102,7 +104,7 @@ g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 ```
 python -m pip install ziglang
 python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp
 ```
 
 ## 实现要点
@@ -123,6 +125,15 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
   窗口距离 `d²`，权重 `w = max(1 - d²·κ, 0)⁸`，其中
   `κ = 255² / (3·h²·81)`，h 由 `--denoise` 提供；聚合 `Σw` 与 `Σw·v` 后输出
   `(wref·maxw·src + Σw·v) / (wref·maxw + Σw)`。
+- **FineDehalo**（havsfunc `haf.FineDehalo` 的移植，参数固定为 havsfunc 默认：
+  DeHalo_alpha rx=2/ry=2/darkstr=brightstr=1/lowsens=highsens=50/ss=1.5，
+  FineDehalo thmi=80/thma=128/thlimi=50/thlima=100、excl=True）：先做
+  DeHalo_alpha 去晕（Bicubic(a=1/3,b=1/3) 缩放的模糊晕层与其原图的差、
+  1.5× Lanczos 上行采样 min/max 钳制再回落、亮度域混合），再用 Prewitt 边缘
+  + 两档亮度阈值（thmi/thma 主边缘、thlimi/thlima 弱边缘）、矩形/菱形形态学
+  扩张-腐蚀、3×3 盒卷积构造「排除区」，最后 `MaskedMerge` 只在掩码 255 处
+  换成去晕结果。Expr 步骤按参考实现的逐运算 float + round-half-even(rint)
+  语义复刻，输出钳位到 [0,255]。
 
 ## 验证
 
@@ -136,6 +147,7 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 | spline36 重采样 | 与 fmtconv 16bit 输出 >>8 比 | 100% 像素差 ≤1 |
 | 整条 AA 链 | VS 全程 16bit >>8 vs 本工具 8bit | 100% 像素差 ≤2，99.9% ≤1 |
 | NLMeans（8bit） | 与 nlm_ispc.dll（d=0,a=2,s=4,wmode=3,wref=1）直接比 | 100% 逐像素一致 |
+| FineDehalo（8bit） | 与 havsfunc（全部默认参数）直接比 | 结构与掩码一致；光晕区像素差 ≤24，源于内部 resize 内核（Bicubic/Lanczos）的浮点细节差异 |
 
 剩余 ±1..2 是「本工具全程 8bit 取整」与「VS 在 16bit 中间精度下计算再截断」
 之间的正常差异（fmtconv 强制 16bit 中间精度）。彩色路径用 PPM 测试卡验证：
