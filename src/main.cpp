@@ -18,7 +18,9 @@
  * Image I/O via stb_image / stb_image_write (public domain).
  *
  * Usage:
- *   aa.exe -i input.png -o output.png [options]
+ *   aa.exe -i input.png [-i input2.png ...] [-o output.png] [options]
+ *   Multiple -i inputs run as a serial batch; -o is then ignored and each
+ *   output is <input basename>_output.<same ext>.
  *   options: --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), -h / --help
  *
@@ -154,8 +156,13 @@ static void parseResize(const char *s, int &rw, int &rh)
     rh = side(b);
 }
 
+// Runs `steps` on the plane. In batch mode (accMs != nullptr) the per-step wall
+// time is accumulated into stepMs/stepNames instead of printed per file; the
+// totals are reported once by main() after all inputs.
 static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
-                     const std::vector<Step> &steps, std::vector<u8> *refRgb)
+                     const std::vector<Step> &steps, std::vector<u8> *refRgb,
+                     std::vector<double> *accMs = nullptr,
+                     std::vector<std::string> *accNames = nullptr)
 {
     int idx = 0;
     for (const Step &st : steps) {
@@ -221,7 +228,14 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
         }
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
-        std::printf("  step %d  %-16s %8.2f ms\n", ++idx, name, ms);
+        ++idx;
+        if (accMs) {
+            (*accMs)[idx - 1] += ms;
+            if (accNames)
+                (*accNames)[idx - 1] = name;
+        } else {
+            std::printf("  step %d  %-16s %8.2f ms\n", idx, name, ms);
+        }
     }
 }
 
@@ -233,9 +247,12 @@ static void printHelp()
     std::printf(
         "aa.exe - EEDI2 anti-aliasing + NLMeans denoise + resize\n"
         "\n"
-        "Usage: aa.exe -i <input> [-o <output>] [--aa] [--denoise <h>] [--resize <W>x<H>]\n"
+        "Usage: aa.exe -i <input> [-i <input> ...] [-o <output>] [options]\n"
         "\n"
-        "  -i, --input <file>    input image (PNG/BMP/PNM/TGA, gray or RGB)\n"
+        "  -i, --input <file>    input image (PNG/BMP/PNM/TGA, gray or RGB); may be\n"
+        "                        repeated to process a batch of files serially;\n"
+        "                        -o is then ignored and each output is\n"
+        "                        <input basename>_output.<same ext>\n"
         "  -o, --output <file>   output image (format from extension);\n"
         "                        omitted: <input basename>_output.<same ext>\n"
         "  --aa                  anti-aliasing (EEDI2 chain, parameters fixed)\n"
@@ -252,12 +269,23 @@ static void printHelp()
         "Examples:\n"
         "  aa.exe -i in.png --denoise 5 --aa\n"
         "  aa.exe -i in.png --resize 1920x --aa\n"
-        "  aa.exe -i in.png -o out.png --aa --denoise 3\n");
+        "  aa.exe -i in.png -o out.png --aa --denoise 3\n"
+        "  aa.exe -i a.png -i b.png -i c.png --aa --denoise 5\n");
+}
+
+// Default output path: <input basename>_output.<same extension>
+static std::string defaultOutput(const std::string &input)
+{
+    const auto pos = input.find_last_of('.');
+    if (pos == std::string::npos)
+        return input + "_output";
+    return input.substr(0, pos) + "_output" + input.substr(pos);
 }
 
 int main(int argc, char **argv)
 {
-    std::string input, output;
+    std::vector<std::string> inputs;
+    std::string output;
     std::string dumpEedi2, dumpRs;
     std::vector<Step> steps;
 
@@ -270,7 +298,7 @@ int main(int argc, char **argv)
             }
             return argv[++i];
         };
-        if (a == "-i" || a == "--input") input = next("-i");
+        if (a == "-i" || a == "--input") inputs.push_back(next("-i"));
         else if (a == "-o" || a == "--output") output = next("-o");
         else if (a == "--aa") steps.push_back({StepKind::AA, 0.0f, -1, -1});
         else if (a == "--denoise") {
@@ -299,19 +327,16 @@ int main(int argc, char **argv)
         }
     }
 
-    if (input.empty()) {
+    if (inputs.empty()) {
         std::fprintf(stderr, "error: -i is required\n");
         printHelp();
         return 1;
     }
 
-    if (output.empty()) {
-        // default: <input basename>_output.<same extension>
-        const auto pos = input.find_last_of('.');
-        if (pos == std::string::npos)
-            output = input + "_output";
-        else
-            output = input.substr(0, pos) + "_output" + input.substr(pos);
+    const bool batch = inputs.size() > 1;
+    if (batch && !output.empty()) {
+        std::fprintf(stderr, "warning: -o ignored with multiple -i inputs\n");
+        output.clear();
     }
 
     for (const Step &st : steps) {
@@ -325,47 +350,22 @@ int main(int argc, char **argv)
         }
     }
 
-    Image img;
-    if (!loadImage(input, img)) {
-        std::fprintf(stderr, "error: cannot read image '%s'\n", input.c_str());
-        return 1;
-    }
-    if (img.w < 8 || img.h < 8) {
-        std::fprintf(stderr, "error: image too small (need w>=8, h>=8)\n");
-        return 1;
-    }
-
     Eedi2Params p;                       // fixed AA parameters (script defaults)
     eedi2_prepare(p);
 
-    if (!dumpEedi2.empty() && !dumpRs.empty()) {
-        // debug: dump the first EEDI2 pass (w x 2h raw gray8) and its
-        // resampleV result (w x h raw gray8) for comparison with eedi2/fmtc
-        std::vector<u8> y;
-        if (img.ch == 3)
-            rgbLuma(img.p.data(), img.w * img.h, y);
-        else
-            y = img.p;
-        Eedi2 eedi2(p);
-        std::vector<u8> h2(std::size_t(img.w) * img.h * 2);
-        eedi2.run(y.data(), img.w, img.h, h2.data());
-        FILE *f = std::fopen(dumpEedi2.c_str(), "wb");
-        if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpEedi2.c_str()); return 1; }
-        std::fwrite(h2.data(), 1, h2.size(), f);
-        std::fclose(f);
-        std::vector<u8> r1(std::size_t(img.w) * img.h);
-        resampleV(h2.data(), img.w, img.h * 2, img.h, -0.5, r1.data());
-        f = std::fopen(dumpRs.c_str(), "wb");
-        if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpRs.c_str()); return 1; }
-        std::fwrite(r1.data(), 1, r1.size(), f);
-        std::fclose(f);
-        std::printf("ok: dumped eedi2 %d x %d -> %d x %d, rs %d x %d\n",
-                    img.w, img.h, img.w, img.h * 2, img.w, img.h);
-        return 0;
-    }
-
     if (!dumpEedi2.empty()) {
-        // debug: dump the first EEDI2 pass (w x 2h raw gray8) for comparison
+        // debug: dump the first input's EEDI2 pass (and optionally the
+        // resampleV result) as raw gray8, then exit
+        const std::string &input = inputs[0];
+        Image img;
+        if (!loadImage(input, img)) {
+            std::fprintf(stderr, "error: cannot read image '%s'\n", input.c_str());
+            return 1;
+        }
+        if (img.w < 8 || img.h < 8) {
+            std::fprintf(stderr, "error: image too small (need w>=8, h>=8)\n");
+            return 1;
+        }
         std::vector<u8> y;
         if (img.ch == 3)
             rgbLuma(img.p.data(), img.w * img.h, y);
@@ -374,33 +374,68 @@ int main(int argc, char **argv)
         Eedi2 eedi2(p);
         std::vector<u8> h2(std::size_t(img.w) * img.h * 2);
         eedi2.run(y.data(), img.w, img.h, h2.data());
+        if (!dumpRs.empty()) {
+            std::vector<u8> r1(std::size_t(img.w) * img.h);
+            resampleV(h2.data(), img.w, img.h * 2, img.h, -0.5, r1.data());
+            FILE *f = std::fopen(dumpRs.c_str(), "wb");
+            if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpRs.c_str()); return 1; }
+            std::fwrite(r1.data(), 1, r1.size(), f);
+            std::fclose(f);
+        }
         FILE *f = std::fopen(dumpEedi2.c_str(), "wb");
         if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpEedi2.c_str()); return 1; }
         std::fwrite(h2.data(), 1, h2.size(), f);
         std::fclose(f);
-        std::printf("ok: dumped %d x %d -> %d x %d\n", img.w, img.h, img.w, img.h * 2);
+        std::printf("ok: dumped eedi2 %d x %d -> %d x %d%s\n",
+                    img.w, img.h, img.w, img.h * 2, dumpRs.empty() ? "" : " (+ rs)");
         return 0;
     }
 
-    if (!steps.empty()) {
-        if (img.ch == 1) {
-            runSteps(p, img.p, img.w, img.h, steps, nullptr);
-        } else {
-            std::vector<u8> y;
-            rgbLuma(img.p.data(), img.w * img.h, y);
-            std::vector<u8> refRgb = img.p;              // chroma reference, size kept in lockstep
-            runSteps(p, y, img.w, img.h, steps, &refRgb);
-            std::vector<u8> rgb;
-            applyLuma(y, refRgb.data(), img.w * img.h, rgb);
-            img.p = std::move(rgb);
+    // per-step wall time, summed over all inputs in batch mode
+    std::vector<double> stepMs(steps.size(), 0.0);
+    std::vector<std::string> stepNames(steps.size());
+
+    for (const std::string &input : inputs) {
+        Image img;
+        if (!loadImage(input, img)) {
+            std::fprintf(stderr, "error: cannot read image '%s'\n", input.c_str());
+            return 1;
         }
+        if (img.w < 8 || img.h < 8) {
+            std::fprintf(stderr, "error: image too small (need w>=8, h>=8)\n");
+            return 1;
+        }
+
+        if (!steps.empty()) {
+            if (img.ch == 1) {
+                runSteps(p, img.p, img.w, img.h, steps, nullptr,
+                         batch ? &stepMs : nullptr, batch ? &stepNames : nullptr);
+            } else {
+                std::vector<u8> y;
+                rgbLuma(img.p.data(), img.w * img.h, y);
+                std::vector<u8> refRgb = img.p;              // chroma reference, size kept in lockstep
+                runSteps(p, y, img.w, img.h, steps, &refRgb,
+                         batch ? &stepMs : nullptr, batch ? &stepNames : nullptr);
+                std::vector<u8> rgb;
+                applyLuma(y, refRgb.data(), img.w * img.h, rgb);
+                img.p = std::move(rgb);
+            }
+        }
+
+        std::string out = output;
+        if (out.empty())
+            out = defaultOutput(input);
+        if (!saveImage(out, img)) {
+            std::fprintf(stderr, "error: cannot write image '%s'\n", out.c_str());
+            return 1;
+        }
+        std::printf("ok: %d x %d -> %d x %d (%s)\n", img.w, img.h, img.w, img.h, out.c_str());
     }
 
-    if (!saveImage(output, img)) {
-        std::fprintf(stderr, "error: cannot write image '%s'\n", output.c_str());
-        return 1;
+    if (batch && !steps.empty()) {
+        std::printf("step times summed over %zu input(s):\n", inputs.size());
+        for (size_t k = 0; k < steps.size(); k++)
+            std::printf("  step %zu  %-16s %8.2f ms\n", k + 1, stepNames[k].c_str(), stepMs[k]);
     }
-
-    std::printf("ok: %d x %d -> %d x %d (%s)\n", img.w, img.h, img.w, img.h, output.c_str());
     return 0;
 }
