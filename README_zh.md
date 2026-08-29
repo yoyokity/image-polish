@@ -94,7 +94,7 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 - 如果你不懂具体滤镜的用法，也可以使用下面这个万能参数：
 
   ```bash
-  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen 0.9 --dehalo --quality 92
+  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen 0.9 --dehalo --grain 15 --quality 92
   ```
 
 
