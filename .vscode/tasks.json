@@ -4,9 +4,12 @@
         {
             "label": "mkdir out",
             "type": "shell",
-            "detail": "创建 out 构建目录（build 的前置任务）",
+            "detail": "Create the out build directory (dependency of the build tasks)",
             "command": "cmd",
-            "args": ["/c", "if not exist out mkdir out"],
+            "args": [
+                "/c",
+                "if not exist out mkdir out"
+            ],
             "problemMatcher": [],
             "presentation": {
                 "reveal": "silent",
@@ -16,35 +19,13 @@
         {
             "label": "build",
             "type": "shell",
-            "detail": "用 clang++ 编译 src 下全部源文件生成 out/aa.exe",
-            "command": "clang++",
+            "detail": "Build imagepolish.exe for the current platform (python build.py), removing .pdb debug symbols. Default task (Ctrl+Shift+B).",
+            "command": "python",
             "args": [
-                "--target=x86_64-w64-windows-gnu",
-                "-std=c++17",
-                "-O2",
-                "-Wall",
-                "-Wextra",
-                "-Wno-missing-field-initializers",
-                "-Isrc",
-                "src/main.cpp",
-                "src/chain.cpp",
-                "src/color.cpp",
-                "src/imageio.cpp",
-                "src/filters/eedi2.cpp",
-                "src/filters/resample.cpp",
-                "src/filters/repair.cpp",
-                "src/filters/nlmeans.cpp",
-                "src/filters/dehalo.cpp",
-                "src/filters/cas.cpp",
-                "src/filters/deband.cpp",
-                "-o",
-                "out/aa.exe"
+                "build.py"
             ],
             "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "PATH": "C:\\Program Files\\LLVM\\bin;${env:PATH}"
-                }
+                "cwd": "${workspaceFolder}"
             },
             "group": {
                 "kind": "build",
@@ -52,7 +33,46 @@
             },
             "problemMatcher": {
                 "owner": "cpp",
-                "fileLocation": ["relative", "${workspaceFolder}"],
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}"
+                ],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            },
+            "dependsOn": "mkdir out",
+            "presentation": {
+                "reveal": "always",
+                "clear": true
+            }
+        },
+        {
+            "label": "build all platforms",
+            "type": "shell",
+            "detail": "Cross-compile imagepolish for all target platforms (python build.py --all) into out/ with version-tagged names.",
+            "command": "python",
+            "args": [
+                "build.py",
+                "--all"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build"
+            },
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}"
+                ],
                 "pattern": {
                     "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
                     "file": 1,

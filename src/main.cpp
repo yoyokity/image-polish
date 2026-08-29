@@ -1,5 +1,5 @@
 /*
- * aa - EEDI2-based anti-aliasing, standalone C++ command line tool.
+ * imagepolish - EEDI2-based anti-aliasing, standalone C++ command line tool.
  *
  * Implements the well-known VapourSynth anti-aliasing chain:
  *
@@ -18,20 +18,18 @@
  * Image I/O via stb_image / stb_image_write (public domain).
  *
  * Usage:
- *   aa.exe -i input.png [-i input2.png ...] [-o output.png] [options]
+ *   imagepolish -i input.png [-i input2.png ...] [-o output.png] [options]
  *   Multiple -i inputs run as a serial batch; -o is then ignored and each
  *   output is <input basename>_output.<same ext>.
  *   options: --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
  *            --quality N (JPEG output quality, 1..100, default 80),
- *            -h / --help
+ *            -v / --version, -h / --help
  *
- * Build:
- *   g++ -O2 -std=c++17 -Isrc -o out/aa.exe src/main.cpp src/chain.cpp \
- *       src/color.cpp src/imageio.cpp src/filters/eedi2.cpp \
- *       src/filters/resample.cpp src/filters/repair.cpp \
- *       src/filters/nlmeans.cpp src/filters/dehalo.cpp src/filters/cas.cpp \
- *       src/filters/deband.cpp
+ * Build (see build.py):
+ *   python build.py            current platform -> out/imagepolish.exe
+ *   python build.py --all      cross-compile all platforms ->
+ *                              out/imagepolish-<version>-<target>[.exe]
  */
 
 #include <cstdio>
@@ -44,6 +42,12 @@
 #include "filters/eedi2.h"
 #include "imageio.h"
 #include "filters/resample.h"
+#include "version.h"
+
+// Stringify a macro token (version.h keeps the version unquoted so that build
+// scripts can extract it; here it becomes the "--version" string).
+#define IMAGEPOLISH_STR_(x) #x
+#define IMAGEPOLISH_STR(x) IMAGEPOLISH_STR_(x)
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -51,9 +55,9 @@
 static void printHelp()
 {
     std::printf(
-        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise + resize + deband\n"
+        "imagepolish - EEDI2 anti-aliasing + NLMeans denoise + resize + deband\n"
         "\n"
-        "Usage: aa.exe -i <input> [-i <input> ...] [-o <output>] [options]\n"
+        "Usage: imagepolish -i <input> [-i <input> ...] [-o <output>] [options]\n"
         "\n"
         "  -i, --input <file>    input image (PNG/BMP/PNM/TGA, gray or RGB); may be\n"
         "                        repeated to process a batch of files serially;\n"
@@ -75,15 +79,16 @@ static void printHelp()
         "                        keep their defaults, any order\n"
         "  --quality <q>       JPEG output quality 1..100 (default 80);\n"
         "                        only affects .jpg/.jpeg outputs\n"
+        "  -v, --version        print version and exit\n"
         "\n"
         "Steps are executed in the order they appear on the command line;\n"
         "with no step the image is passed through unchanged.\n"
         "\n"
         "Examples:\n"
-        "  aa.exe -i in.png --denoise 5 --aa\n"
-        "  aa.exe -i in.png --resize 1920x --aa\n"
-        "  aa.exe -i in.png -o out.png --aa --denoise 3\n"
-        "  aa.exe -i a.png -i b.png -i c.png --aa --denoise 5\n");
+        "  imagepolish -i in.png --denoise 5 --aa\n"
+        "  imagepolish -i in.png --resize 1920x --aa\n"
+        "  imagepolish -i in.png -o out.png --aa --denoise 3\n"
+        "  imagepolish -i a.png -i b.png -i c.png --aa --denoise 5\n");
 }
 
 // Default output path: <input basename>_output.<same extension>
@@ -142,6 +147,10 @@ int main(int argc, char **argv)
         }
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
+        else if (a == "-v" || a == "--version") {
+            std::printf("imagepolish %s\n", IMAGEPOLISH_STR(IMAGEPOLISH_VERSION));
+            return 0;
+        }
         else if (a == "-h" || a == "--help") { printHelp(); return 0; }
         else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
