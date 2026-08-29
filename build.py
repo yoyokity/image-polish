@@ -23,7 +23,7 @@ SOURCES = [
     "src/main.cpp", "src/chain.cpp", "src/color.cpp", "src/imageio.cpp",
     "src/filters/eedi2.cpp", "src/filters/resample.cpp", "src/filters/repair.cpp",
     "src/filters/nlmeans.cpp", "src/filters/dehalo.cpp", "src/filters/cas.cpp",
-    "src/filters/deband.cpp", "src/filters/sangnom.cpp",
+    "src/filters/deband.cpp", "src/filters/sangnom.cpp", "src/filters/grain.cpp",
 ]
 COMMON = ["-O2", "-std=c++17", "-Wall", "-Wextra",
           "-Wno-missing-field-initializers", "-Isrc"]

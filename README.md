@@ -11,7 +11,7 @@
 **Parameters used for the image above:**
 
 ```bash
-imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen --dehalo --denoise
+imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen 0.9 --dehalo --grain 10
 ```
 
 
@@ -66,6 +66,7 @@ Without `-o`, the output is `<input basename>_output.<same extension>` (e.g. `in
 | `--aa [N]` | Anti-aliasing; `N` is the strength (`1`, `2`, default `2`) |
 | `--sharpen [s]` | CAS sharpen; `s` is sharpness (`0~1`, default `0.7`) |
 | `--dehalo` | Dehalo, fixed parameters |
+| `--grain [h]` | Film grain; `h` is the noise variance (`0~100`, default `10`) |
 
 Examples:
 
@@ -87,6 +88,8 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
   ```bash
   imagepolish -i in.png --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16
   ```
+
+- Adding `--grain` at the very end is highly recommended: a layer of noise preserves detail and reduces the smeared look left behind by restoration.
 
 - If you are not sure which filters to use, this one-liner covers everything:
 
@@ -132,6 +135,7 @@ Only the BT.601 full-range luma is processed; chroma never goes through lossy 8-
 - **FineDehalo** (port of havsfunc `haf.FineDehalo`, havsfunc defaults: DeHalo_alpha rx=2/ry=2, darkstr=brightstr=1, lowsens=highsens=50, ss=1.5; FineDehalo thmi=80/thma=128, thlimi=50/thlima=100, excl=True): DeHalo_alpha dehaloring (Bicubic(1/3,1/3) blurred halo layer minus source, 1.5× Lanczos upsampled min/max clamped, blended in luma) → Prewitt edges + two luma thresholds (thmi/thma main, thlimi/thlima weak) + rect/diamond morphology + 3×3 box "exclusion mask" → `MaskedMerge` replaces only mask-255 pixels. Expr steps reproduce the reference's per-op float + round-half-even (rint) semantics.
 - **CAS** (port of HolyWu / VapourSynth-CAS, i.e. AMD FidelityFX CAS): 3×3 soft min/max drives contrast-adaptive amplitude `amp = sqrt(clamp(min(mn, limit-mx)/mx))`, weight `w = amp·(-1/lerp(16,5,s))`, cross filter `((b+d+f+h)·w+e)/(1+4w)`.
 - **Deband** (port of neo_f3kdb `Deband(range,y,cb,cr,grainy=0,grainc=0, output_depth=16)`, i.e. default sample_mode=2, blur_first=true, random_algo_ref=UNIFORM, no grain/dither): 8-bit samples are upsampled to the 16-bit internal domain (`<<8`, thresholds `y<<2` with the reference's `scale=false`); per pixel, random distances `ref1/ref2 ∈ [0, cur_range]` (borders clamped, RNG sequence reproducing `init_frame_luts` exactly: one LCG seed advanced per pixel in Y/ref1/ref2/Cb/Cr order) pick 4 diagonal references, averaged by the reference's SSE `avg_4` (first pair minus 1, then averaged with the second); the pixel is kept only if `|avg - px| >= threshold`, otherwise `avg` replaces it; finally `>>8` back to 8-bit. Like every other filter it acts on the luma plane only (`cb/cr` accepted for reference compatibility).
+- **Grain** (port of VapourSynth-AddGrain, i.e. `core.grain.Add`; original AddGrain by Tom Barry / Firesledge, VapourSynth port by HolyWu): a 32-bit LCG (`idum = 1664525·idum + 1013904223`) and polar Box-Muller (the second sample cached in the `gset` state for the next call) produce a standard normal, scaled by `sqrt(var)` to `N(0, var)`; each pixel draws independently (the reference's `hcorr/vcorr` default to 0 = no horizontal/vertical correlation), and the drawn value is rounded to an int8 delta, added to the source and finally clamped to `[0,255]`. Deviation from the reference: the plugin seeds from the wall clock by default and pre-generates a 2× tall noise field into which it rolls a per-frame window; this port instead derives the seed from an FNV-1a hash of the image and draws the field directly per pixel (equivalent for a single still frame), so the same input is reproducible. `var <= 0` passes through.
 
 ### Verification
 
@@ -147,6 +151,7 @@ Pixel-compared against a real VapourSynth installation (vapoursynth pip package 
 | FineDehalo (8bit) | havsfunc (all defaults) directly | masks match; halo-region pixels within 24 (float detail in internal resize kernels) |
 | CAS (8bit) | cas.dll (sharpness=0.7) directly | 99.3% byte-identical, rest within 2 (plugin AVX2/AVX512 reassociation) |
 | Deband (8bit) | neo-f3kdb.dll r7 (several range/y, GRAY16 output) >>8 | 100% pixel-identical |
+| Grain (8bit) | addgrain.dll (`core.grain.Add`, var=40) noise statistics | mean/std match within 0.1% (seeds differ, so pixels are not comparable) |
 
 Deband was verified at 480×320, 386×277, 300×220 and 333×241 with several parameter sets (including `y=0`, where the output must equal the input); the rest of the chain matches at the same level.
 

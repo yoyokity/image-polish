@@ -11,7 +11,7 @@
 **上图所用参数：**
 
 ```bash
-imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen --dehalo --denoise
+imagepolish -i input.png -denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen 0.9 --dehalo --grain 10
 ```
 
 
@@ -66,6 +66,7 @@ imagepolish -i a.png -i b.png -i c.png --deband y=40
 | `--aa [N]` | 去锯齿，`N` 为强度（1、2，默认2） |
 | `--sharpen [s]` | CAS 锐化，`s` 为 sharpness（`0~1`，默认 `0.7`） |
 | `--dehalo` | 去光晕，参数固定 |
+| `--grain [h]` | 胶片颗粒，`h` 为噪声方差（`0~100`，默认 `10`） |
 
 示例：
 
@@ -87,6 +88,8 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
   ```bash
   imagepolish -i in.png --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16
   ```
+
+- 强烈推荐在最后面加 `--grain`，有一层噪点可以更加保护细节，减少修复后的涂抹感
 
 - 如果你不懂具体滤镜的用法，也可以使用下面这个万能参数：
 
@@ -134,6 +137,7 @@ python build.py --all    # 全平台 -> out/imagepolish-<版本>-<目标平台>[
 - **FineDehalo**（havsfunc `haf.FineDehalo` 的移植，参数固定为 havsfunc 默认： DeHalo_alpha rx=2/ry=2/darkstr=brightstr=1/lowsens=highsens=50/ss=1.5， FineDehalo thmi=80/thma=128/thlimi=50/thlima=100、excl=True）：DeHalo_alpha 去晕（Bicubic(a=1/3,b=1/3) 缩放的模糊晕层与其原图的差、1.5× Lanczos 上行采样 min/max 钳制再回落、亮度域混合）→ Prewitt 边缘 + 两档亮度阈值 （thmi/thma 主边缘、thlimi/thlima 弱边缘）、矩形/菱形形态学扩张-腐蚀、 3×3 盒卷积构造「排除区」→ `MaskedMerge` 只在掩码 255 处换成去晕结果。 Expr 步骤按参考实现的逐运算 float + round-half-even(rint) 语义复刻。
 - **CAS**（HolyWu / VapourSynth-CAS 的移植，即 AMD FidelityFX CAS）：3×3 软 min/max 导出对比度自适应振幅 `amp = sqrt(clamp(min(mn, limit-mx)/mx))`，权重 `w = amp·(-1/lerp(16,5,s))`，输出十字滤波 `((b+d+f+h)·w+e)/(1+4w)`。
 - **Deband**（neo_f3kdb `Deband(range,y,cb,cr,grainy=0,grainc=0, output_depth=16)` 的移植，即默认 sample_mode=2、blur_first=true、 random_algo_ref=UNIFORM、无 grain 无 dither）：8 位样本上采样进 16 位内部域（`<<8`，阈值按参考 `scale=false` 取 `y<<2`）；每像素由 LUT 中的随机距离 `ref1/ref2 ∈ [0, cur_range]`（`cur_range` 取 `range` 与四边距离的最小值，随机序列严格复刻参考 `init_frame_luts`：每像素按 Y/ref1/ref2/Cb/Cr 顺序推进同一个 LCG 种子）取 4 个对角参考点，用参考 SSE 例程的 `avg_4`（第一对平均后饱和减 1，再与第二对平均）求 16 位均值；仅当 `|avg - px| >= threshold` 时保留原值，否则用均值，最后 `>>8` 回到 8 位。与其它步骤一致，只作用于亮度平面（`cb/cr` 参数为兼容参考调用而保留）。
+- **Grain**（VapourSynth-AddGrain 的移植，即 `core.grain.Add`；原始算法为 Tom Barry / Firesledge 的 AddGrain，VapourSynth 移植由 HolyWu 完成）：32 位 LCG（`idum = 1664525·idum + 1013904223`）+ Box-Muller 极坐标法（第二个样本存入 `gset` 状态留待下次调用）生成标准正态样本，乘 `√var` 得 `N(0, var)`；逐像素独立取噪（参考 `hcorr/vcorr` 默认 0，即无水平/垂直相关性平滑），`round` 成 int8 增量后加到原像素并整体钳制 `[0,255]`。与参考的差异：参考默认以系统时间为种子、并为多帧视频预生成 2 倍高噪声场再滚动取窗；本工具以图像内容的 FNV-1a 哈希为种子直接逐像素绘制（静态单帧等效），使同一输入结果可复现。`var <= 0` 直通。
 
 
 
@@ -151,6 +155,7 @@ python build.py --all    # 全平台 -> out/imagepolish-<版本>-<目标平台>[
 | FineDehalo（8bit） | 与 havsfunc（全部默认参数）直接比 | 结构与掩码一致；光晕区像素差 ≤24（内部 resize 内核的浮点细节差异） |
 | CAS（8bit） | 与 cas.dll（sharpness=0.7）直接比 | 99.3% 逐字节一致，其余像素差 ≤2（插件 AVX2/AVX512 中间顺序重排所致） |
 | Deband（8bit） | 与 neo-f3kdb.dll r7（多组 range/y，输出 GRAY16）的 >>8 直接比 | 100% 逐像素一致 |
+| Grain（8bit） | 与 addgrain.dll（`core.grain.Add`，var=40）噪声统计对比 | 标准差/均值一致（差 <0.1%；种子不同，逐像素不可比） |
 
 其中 Deband 的对比覆盖了 480×320、386×277、300×220、333×241 等多尺寸与多组参数（含 `y=0` 边界，此时输出应与原图一致）；整条链的水平与此一致。
 

@@ -9,11 +9,11 @@ struct Eedi2Params;
 
 // Processing steps, applied to the luma plane in command-line order. The
 // static factories keep the CLI parsing independent of the field layout.
-enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen, Deband };
+enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen, Deband, Grain };
 
 struct Step {
     StepKind kind;
-    float h = 0.0f;       // NLMeans strength for Denoise steps
+    float h = 0.0f;       // NLMeans strength (Denoise) or grain variance (Grain)
     int rw = -1, rh = -1; // Resize targets (-1: keep proportional)
     int dbr = 24, dby = 72, dbc = 32; // Deband range / luma / chroma thresholds
     int aaLevel = 2;      // 2: EEDI2 + SangNom strong AA (default); 1: EEDI2 chain
@@ -24,6 +24,7 @@ struct Step {
     static Step resize(int w, int h) { return {StepKind::Resize, 0.0f, w, h}; }
     static Step dehalo() { return {StepKind::Dehalo}; }
     static Step deband(int range, int y, int cbcr) { return {StepKind::Deband, 0.0f, -1, -1, range, y, cbcr}; }
+    static Step grain(float h) { return {StepKind::Grain, h}; }
 };
 
 // Parse "--resize WxH | Wx | xH"; a missing side (-1) is kept proportional.

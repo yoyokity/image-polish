@@ -4,6 +4,7 @@
 #include "filters/deband.h"
 #include "filters/dehalo.h"
 #include "filters/eedi2.h"
+#include "filters/grain.h"
 #include "filters/nlmeans.h"
 #include "filters/repair.h"
 #include "filters/resample.h"
@@ -272,6 +273,13 @@ void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
             cas(plane.data(), w, h, st.h, out.data());
             plane = std::move(out);
             std::snprintf(name, sizeof name, "CAS s=%g", st.h);
+            break;
+        }
+        case StepKind::Grain: {
+            std::vector<u8> out(std::size_t(w) * h);
+            grain(plane.data(), w, h, st.h, out.data());
+            plane = std::move(out);
+            std::snprintf(name, sizeof name, "Grain var=%g", st.h);
             break;
         }
         case StepKind::Deband: {

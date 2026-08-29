@@ -24,6 +24,7 @@
  *   options: --aa [1|2] (2 = strong AA, EEDI2 + 3/2 supersample + SangNom),
  *            --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
+ *            --grain [h] (AddGrain noise variance, default 10),
  *            --quality N (JPEG output quality, 1..100, default 80),
  *            -v / --version, -h / --help
  *
@@ -80,6 +81,9 @@ static void printHelp()
         "                        names: range (0..255), y (0..511), cbcr\n"
         "                        (0..511), defaults 24,72,32; omitted names\n"
         "                        keep their defaults, any order\n"
+        "  --grain [<h>]         film grain (AddGrain); <h> is the noise\n"
+        "                        variance std=h^0.5 (default 10), e.g. 20~100 for\n"
+        "                        visible grain, 0 disables; seed derived from image\n"
         "  --quality <q>       JPEG output quality 1..100 (default 80);\n"
         "                        only affects .jpg/.jpeg outputs\n"
         "  -v, --version        print version and exit\n"
@@ -148,6 +152,16 @@ int main(int argc, char **argv)
             steps.push_back(Step::resize(rw, rh));
         }
         else if (a == "--dehalo") steps.push_back(Step::dehalo());
+        else if (a == "--grain") {
+            float gv = 10.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                gv = static_cast<float>(std::atof(argv[++i]));
+            if (gv < 0.0f) {
+                std::fprintf(stderr, "error: --grain variance must be >= 0\n");
+                return 1;
+            }
+            steps.push_back(Step::grain(gv));
+        }
         else if (a == "--deband") {
             int r = 24, y = 72, c = 32;
             if (i + 1 < argc && argv[i + 1][0] != '-')
