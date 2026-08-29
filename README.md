@@ -1,14 +1,15 @@
-# aa.exe — EEDI2 抗锯齿 + NLMeans 降噪命令行工具（C++ 独立实现）
+# aa.exe — EEDI2 抗锯齿 + NLMeans 降噪 + Deband 去色带命令行工具（C++ 独立实现）
 
 把 VapourSynth 抗锯齿 + 降噪链完整移植为独立 C++ 程序（源码按模块拆在
 `src/`），无需安装 VapourSynth / 插件，直接对图片跑：
 
 ```
-out/aa.exe -i 输入图片 [-o 输出图片] [--aa] [--denoise 5]
+out/aa.exe -i 输入图片 [-o 输出图片] [--aa] [--denoise 5] [--deband]
 ```
 
 处理步骤按命令行出现顺序执行：`--aa` 去锯齿（参数固定），`--denoise N` 做
-NLMeans 降噪（N 即滤波强度 h）；两个都不给则原样输出。省略 `-o` 时输出为
+NLMeans 降噪（N 即滤波强度 h），`--deband` 去色带（neo_f3kdb）;都不给则原样
+输出。省略 `-o` 时输出为
 `<输入名>_output.<原扩展名>`（如 `in.png` → `in_output.png`）。
 
 ## 对应的 VapourSynth 脚本
@@ -59,6 +60,7 @@ out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
 | `--sharpen [s]` | CAS 锐化，`s` 为 sharpness（0.0..1.0，缺省 0.7）|
 | `--resize WxH` | 用 spline36 缩放（shift=0 中心对齐）；一侧可省略（`1920x` / `x1080`），另一侧按原宽高比计算 |
 | `--dehalo` | 去光晕：FineDehalo（havsfunc 默认参数，固定，不可自定义）|
+| `--deband [name=value,...]` | 去色带（neo_f3kdb，sample_mode=2、无 grain）：可用参数 `range`（0..255）、`y`（0..511）、`cbcr`（0..511），缺省 24/72/32；省略的参数沿用缺省、顺序任意（如 `--deband y=40`、`--deband range=16,cbcr=48`）|
 
 步骤按命令行出现顺序依次执行，每一步都在前一步的结果上继续；各步骤均可
 省略、可重复、顺序任意。全部省略则输出与输入相同。彩色图缩放时色度用同一
@@ -69,6 +71,9 @@ spline36 核同样缩放（先换亮度，色度仍保持原图语义）。
 ```
 out/aa.exe -i clip.png --aa                       # -> clip_output.png
 out/aa.exe -i in.png --denoise 5                  # -> in_output.png
+out/aa.exe -i in.png --deband                     # 默认 24,72,32 -> in_output.png
+out/aa.exe -i in.png --deband y=40                # 只调亮度阈值，range/cbcr 用默认
+out/aa.exe -i in.png --deband range=16,cbcr=48    # 顺序任意
 out/aa.exe -i in.png --resize 1920x --aa          # 先缩放到 1920 宽，再去锯齿
 out/aa.exe -i in.png --aa --resize x1080 --denoise 5
 out/aa.exe -i in.png -o out.png --denoise 5 --aa
@@ -77,7 +82,7 @@ out/aa.exe -i in.png -o out.png --denoise 5 --aa
 ## 编译
 
 任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`
-（main / eedi2 / resample / repair / imageio / nlmeans / dehalo / cas），构建产物输出到 `out/`：
+（main / eedi2 / resample / repair / imageio / nlmeans / dehalo / cas / deband），构建产物输出到 `out/`：
 
 VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run Build Task`），
 会自动创建 `out/` 目录再编译。
@@ -90,14 +95,15 @@ x86_64 版本，解压后把 `bin` 目录加进 PATH），编译时用 `--target
 ```
 clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
     src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp \
-    src/nlmeans.cpp src/dehalo.cpp
+    src/nlmeans.cpp src/dehalo.cpp src/cas.cpp src/deband.cpp
 ```
 
 或者直接用 MinGW-w64 自带的 g++：
 
 ```
 g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp src/cas.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp \
+    src/dehalo.cpp src/cas.cpp src/deband.cpp
 ```
 
 没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
@@ -105,7 +111,8 @@ g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 ```
 python -m pip install ziglang
 python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp src/dehalo.cpp src/cas.cpp
+    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp \
+    src/dehalo.cpp src/cas.cpp src/deband.cpp
 ```
 
 ## 实现要点
@@ -140,6 +147,17 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
   权重 `w = amp · (-1/lerp(16,5,s))`，输出十字滤波
   `((b+d+f+h)·w + e)/(1+4w)`；sharpness `s` 由 `--sharpen` 传入（0.0..1.0），
   边界行列复制、左右边缘镜像第 1/倒数第 2 列，结果半上取整到 [0,255]。
+- **Deband**（neo_f3kdb `Deband(range,y,cb,cr,grainy=0,grainc=0,
+  output_depth=16)` 的移植，即默认 sample_mode=2、blur_first=true、
+  random_algo_ref=UNIFORM、无 grain 无 dither）：8 位样本先上采样进 16 位
+  内部域（`<<8`，threshold 按参考 `scale=false` 取 `y<<2`），每个像素由 LUT
+  里的随机距离 `ref1/ref2 ∈ [0, cur_range]`（`cur_range` 取 `range` 与四边
+  距离的最小值，边界的随机序列严格复刻参考 `init_frame_luts`：每像素按
+  Y/ref1/ref2/Cb/Cr 顺序推进同一个 LCG 种子）取 4 个对角参考点，用 SSE 例程
+  的 `avg_4`（第一对平均后饱和减 1，再与第二对平均）求 16 位均值；只有当
+  `|avg - px| >= threshold` 时保留原值，否则用均值，最后 `>>8` 回到 8 位。
+  与工具其它步骤一致，只作用于亮度平面（`cb/cr` 参数为兼容参考调用而保留，
+  不影响 luma-only 输出）。
 
 ## 验证
 
@@ -155,6 +173,7 @@ python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
 | NLMeans（8bit） | 与 nlm_ispc.dll（d=0,a=2,s=4,wmode=3,wref=1）直接比 | 100% 逐像素一致 |
 | FineDehalo（8bit） | 与 havsfunc（全部默认参数）直接比 | 结构与掩码一致；光晕区像素差 ≤24，源于内部 resize 内核（Bicubic/Lanczos）的浮点细节差异 |
 | CAS（8bit） | 与 cas.dll（sharpness=0.7）直接比 | 99.3% 像素逐字节一致；其余像素差 ≤2（本机插件走 AVX2/AVX512 路径，中间和顺序重排所致）|
+| Deband（8bit） | 与 neo-f3kdb.dll r7（range/y 多组，输出 GRAY16）的 >>8 直接比 | 100% 逐像素一致（r7 dll 在 SSE4 CPU 上走 SSE 例程，本移植按该路径的 avg_4 语义实现）|
 
 剩余 ±1..2 是「本工具全程 8bit 取整」与「VS 在 16bit 中间精度下计算再截断」
 之间的正常差异（fmtconv 强制 16bit 中间精度）。彩色路径用 PPM 测试卡验证：

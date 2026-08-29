@@ -33,6 +33,7 @@
                 "src/nlmeans.cpp",
                 "src/dehalo.cpp",
                 "src/cas.cpp",
+                "src/deband.cpp",
                 "-o",
                 "out/aa.exe"
             ],

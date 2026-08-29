@@ -22,11 +22,12 @@
  *   Multiple -i inputs run as a serial batch; -o is then ignored and each
  *   output is <input basename>_output.<same ext>.
  *   options: --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
- *            --repair N (0 disables Repair), -h / --help
+ *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
+ *            -h / --help
  *
  * Build:
  *   g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
- *       src/resample.cpp src/repair.cpp src/imageio.cpp
+ *       src/resample.cpp src/repair.cpp src/imageio.cpp src/deband.cpp
  */
 
 #include <algorithm>
@@ -40,6 +41,7 @@
 
 #include "common.h"
 #include "cas.h"
+#include "deband.h"
 #include "dehalo.h"
 #include "eedi2.h"
 #include "imageio.h"
@@ -107,12 +109,13 @@ static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vec
 // ---------------------------------------------------------------------------
 // Processing steps, applied to the luma plane in command-line order
 // ---------------------------------------------------------------------------
-enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen };
+enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen, Deband };
 
 struct Step {
     StepKind kind;
-    float h = 0.0f;      // NLMeans strength for Denoise steps
+    float h = 0.0f;       // NLMeans strength for Denoise steps
     int rw = -1, rh = -1; // Resize targets (-1: keep proportional)
+    int dbr = 24, dby = 72, dbc = 32; // Deband range / luma / chroma thresholds
 };
 
 // Anti-aliasing step: the EEDI2 chain plus Repair(2), parameters fixed to the
@@ -154,6 +157,50 @@ static void parseResize(const char *s, int &rw, int &rh)
     };
     rw = side(a);
     rh = side(b);
+}
+
+// Parse "--deband [<name>=<value>,...]" with names range (0..255), y and
+// cbcr (0..511). Omitted names keep their defaults (24, 72, 32); any order is
+// allowed. Unknown names, duplicates, missing '=' or empty values are errors.
+static void parseDeband(const char *s, int &range, int &y, int &cbcr)
+{
+    bool seen[3] = { false, false, false };
+    const std::string spec = s;
+    size_t pos = 0;
+    while (pos <= spec.size()) {
+        const size_t comma = spec.find(',', pos);
+        const std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (tok.empty()) {
+            std::fprintf(stderr, "error: --deband expects <name>=<value> pairs (e.g. y=40)\n");
+            std::exit(1);
+        }
+        const size_t eq = tok.find('=');
+        if (eq == std::string::npos) {
+            std::fprintf(stderr, "error: --deband '%s' is not a <name>=<value> pair (e.g. y=40)\n", tok.c_str());
+            std::exit(1);
+        }
+        const std::string name = tok.substr(0, eq);
+        const std::string val = tok.substr(eq + 1);
+        if (val.empty()) {
+            std::fprintf(stderr, "error: --deband missing value after '%s='\n", name.c_str());
+            std::exit(1);
+        }
+        const int n = std::atoi(val.c_str());
+        int idx = name == "range" ? 0 : name == "y" ? 1 : name == "cbcr" ? 2 : -1;
+        if (idx < 0) {
+            std::fprintf(stderr, "error: --deband unknown parameter '%s' (expect range, y or cbcr)\n", name.c_str());
+            std::exit(1);
+        }
+        if (seen[idx]) {
+            std::fprintf(stderr, "error: --deband parameter '%s' given more than once\n", name.c_str());
+            std::exit(1);
+        }
+        seen[idx] = true;
+        (idx == 0 ? range : idx == 1 ? y : cbcr) = n;
+        if (comma == std::string::npos)
+            break;
+        pos = comma + 1;
+    }
 }
 
 // Runs `steps` on the plane. In batch mode (accMs != nullptr) the per-step wall
@@ -225,6 +272,17 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
             std::snprintf(name, sizeof name, "CAS s=%g", st.h);
             break;
         }
+        case StepKind::Deband: {
+            DebandParams dp;
+            dp.range = st.dbr;
+            dp.y = st.dby;
+            dp.cbcr = st.dbc;
+            std::vector<u8> out(std::size_t(w) * h);
+            deband(plane.data(), w, h, dp, out.data());
+            plane = std::move(out);
+            std::snprintf(name, sizeof name, "Deband r=%d y=%d", st.dbr, st.dby);
+            break;
+        }
         }
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
@@ -245,7 +303,7 @@ static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &
 static void printHelp()
 {
     std::printf(
-        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise + resize\n"
+        "aa.exe - EEDI2 anti-aliasing + NLMeans denoise + resize + deband\n"
         "\n"
         "Usage: aa.exe -i <input> [-i <input> ...] [-o <output>] [options]\n"
         "\n"
@@ -262,6 +320,11 @@ static void printHelp()
         "  --resize <W>x<H>      resize with spline36; one side may be omitted\n"
         "                        (1920x or x1080, the other side is proportional)\n"
         "  --dehalo              dehalo (FineDehalo, havsfunc defaults, fixed)\n"
+        "  --deband [<name>=<value>,...]\n"
+        "                        deband (neo_f3kdb, sample_mode=2, no grain);\n"
+        "                        names: range (0..255), y (0..511), cbcr\n"
+        "                        (0..511), defaults 24,72,32; omitted names\n"
+        "                        keep their defaults, any order\n"
         "\n"
         "Steps are executed in the order they appear on the command line;\n"
         "with no step the image is passed through unchanged.\n"
@@ -317,6 +380,12 @@ int main(int argc, char **argv)
             steps.push_back({StepKind::Resize, 0.0f, rw, rh});
         }
         else if (a == "--dehalo") steps.push_back({StepKind::Dehalo, 0.0f, -1, -1});
+        else if (a == "--deband") {
+            int r = 24, y = 72, c = 32;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                parseDeband(next("--deband"), r, y, c);
+            steps.push_back({StepKind::Deband, 0.0f, -1, -1, r, y, c});
+        }
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
         else if (a == "-h" || a == "--help") { printHelp(); return 0; }
@@ -347,6 +416,20 @@ int main(int argc, char **argv)
         if (st.kind == StepKind::Sharpen && (st.h < 0.0f || st.h > 1.0f)) {
             std::fprintf(stderr, "error: --sharpen must be in 0.0..1.0\n");
             return 1;
+        }
+        if (st.kind == StepKind::Deband) {
+            if (st.dbr < 0 || st.dbr > 255) {
+                std::fprintf(stderr, "error: --deband range must be in 0..255\n");
+                return 1;
+            }
+            if (st.dby < 0 || st.dby > 511) {
+                std::fprintf(stderr, "error: --deband y must be in 0..511\n");
+                return 1;
+            }
+            if (st.dbc < 0 || st.dbc > 511) {
+                std::fprintf(stderr, "error: --deband cbcr must be in 0..511\n");
+                return 1;
+            }
         }
     }
 
