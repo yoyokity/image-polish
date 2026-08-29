@@ -16,8 +16,9 @@ struct Step {
     float h = 0.0f;       // NLMeans strength for Denoise steps
     int rw = -1, rh = -1; // Resize targets (-1: keep proportional)
     int dbr = 24, dby = 72, dbc = 32; // Deband range / luma / chroma thresholds
+    int aaLevel = 2;      // 2: EEDI2 + SangNom strong AA (default); 1: EEDI2 chain
 
-    static Step aa() { return {StepKind::AA}; }
+    static Step aa(int level = 2) { return {StepKind::AA, 0.0f, -1, -1, 24, 72, 32, level}; }
     static Step denoise(float h) { return {StepKind::Denoise, h}; }
     static Step sharpen(float s) { return {StepKind::Sharpen, s}; }
     static Step resize(int w, int h) { return {StepKind::Resize, 0.0f, w, h}; }

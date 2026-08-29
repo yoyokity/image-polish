@@ -21,7 +21,8 @@
  *   imagepolish -i input.png [-i input2.png ...] [-o output.png] [options]
  *   Multiple -i inputs run as a serial batch; -o is then ignored and each
  *   output is <input basename>_output.<same ext>.
- *   options: --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
+ *   options: --aa [1|2] (2 = strong AA, EEDI2 + 3/2 supersample + SangNom),
+ *            --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
  *            --quality N (JPEG output quality, 1..100, default 80),
  *            -v / --version, -h / --help
@@ -65,7 +66,9 @@ static void printHelp()
         "                        <input basename>_output.<same ext>\n"
         "  -o, --output <file>   output image (format from extension);\n"
         "                        omitted: <input basename>_output.<same ext>\n"
-        "  --aa                  anti-aliasing (EEDI2 chain, parameters fixed)\n"
+        "  --aa [<level>]        anti-aliasing; <level> is 2 (default) or 1:\n"
+        "                        2 = strong AA: EEDI2 + 3/2 supersample + SangNom,\n"
+        "                        1 = EEDI2 chain (fixed parameters)\n"
         "  --denoise [<h>]        NLMeans denoise; <h> is the filter strength\n"
         "                        (default 5)\n"
         "  --sharpen [<s>]        CAS sharpening; <s> in 0.0..1.0 (default 0.7)\n"
@@ -86,8 +89,8 @@ static void printHelp()
         "\n"
         "Examples:\n"
         "  imagepolish -i in.png --denoise 5 --aa\n"
-        "  imagepolish -i in.png --resize 1920x --aa\n"
-        "  imagepolish -i in.png -o out.png --aa --denoise 3\n"
+        "  imagepolish -i in.png --resize 1920x --aa 2\n"
+        "  imagepolish -i in.png -o out.png --aa 2 --denoise 3\n"
         "  imagepolish -i a.png -i b.png -i c.png --aa --denoise 5\n");
 }
 
@@ -119,7 +122,16 @@ int main(int argc, char **argv)
         };
         if (a == "-i" || a == "--input") inputs.push_back(next("-i"));
         else if (a == "-o" || a == "--output") output = next("-o");
-        else if (a == "--aa") steps.push_back(Step::aa());
+        else if (a == "--aa") {
+            int level = 2;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                level = std::atoi(argv[++i]);
+            if (level < 1 || level > 2) {
+                std::fprintf(stderr, "error: --aa level must be 1 or 2\n");
+                return 1;
+            }
+            steps.push_back(Step::aa(level));
+        }
         else if (a == "--denoise") {
             float hv = 5.0f;
             if (i + 1 < argc && argv[i + 1][0] != '-')

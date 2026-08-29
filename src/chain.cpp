@@ -7,6 +7,7 @@
 #include "filters/nlmeans.h"
 #include "filters/repair.h"
 #include "filters/resample.h"
+#include "filters/sangnom.h"
 
 #include <algorithm>
 #include <cctype>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -48,6 +50,73 @@ static void aaStep(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
     std::vector<u8> ref = plane;                    // Repair reference = pre-AA luma
     std::vector<u8> aa;
     aaChain(plane.data(), w, h, p, aa);
+    repair2(aa.data(), ref.data(), w, h, aa.data());
+    plane = std::move(aa);
+}
+
+// ---------------------------------------------------------------------------
+// Strong AA chain (--aa 2), port of the VapourSynth reference:
+//   aa = fmtc.resample(clip, dw, dh)                       // 3/4 downscale
+//   aa = eedi2.EEDI2(aa)                                   // double height
+//   aa = fmtc.resample(aa, w, uh, sy=-0.5).Transpose()
+//   aa = eedi2.EEDI2(aa)                                   // double height
+//   aa = fmtc.resample(aa, uh, uw, sy=-0.5)                // 8-bit passthrough
+//   aa = sangnom.SangNom(aa, aa=48, dh=False).Transpose()
+//   aa = sangnom.SangNom(aa, aa=48, dh=False)
+//   aa = fmtc.resample(aa, clip.width, clip.height)        // back to w x h
+//   (bitdepth to 8 is a no-op: the whole chain runs in gray8 here)
+//
+// The 3/2-scaled working size is rounded up to an even number so both SangNom
+// passes (which reject odd heights) work for any w,h; for sizes where 3w/2 is
+// already even (w or h = 0 or 3 mod 4) this changes nothing. The 3/4 downscale
+// keeps the floor division of the reference; the resamplers absorb the residue.
+// ---------------------------------------------------------------------------
+static void aaChain2(const u8 *gray, int w, int h, const Eedi2Params &p, std::vector<u8> &out)
+{
+    int uw = w * 3 / 2;
+    if (uw & 1)
+        uw += 1;
+    int uh = h * 3 / 2;
+    if (uh & 1)
+        uh += 1;
+    const int dw = w * 3 / 4;
+    const int dh = h * 3 / 4;
+
+    Eedi2 eedi2(p);
+
+    std::vector<u8> d1(std::size_t(dw) * dh);
+    resample2D(gray, w, h, dw, dh, d1.data());                      // dw x dh
+
+    std::vector<u8> a1(std::size_t(dw) * 2 * dh);
+    eedi2.run(d1.data(), dw, dh, a1.data());                        // dw x 2dh
+    std::vector<u8> r1(std::size_t(w) * uh);
+    resample2DShift(a1.data(), dw, 2 * dh, w, uh, 0.0, -0.5, r1.data()); // w x uh
+
+    std::vector<u8> t1(std::size_t(uh) * w);
+    transpose(r1.data(), w, uh, t1.data());                         // uh x w
+
+    std::vector<u8> a2(std::size_t(uh) * 2 * w);
+    eedi2.run(t1.data(), uh, w, a2.data());                         // uh x 2w
+    std::vector<u8> r2(std::size_t(uh) * uw);
+    resample2DShift(a2.data(), uh, 2 * w, uh, uw, 0.0, -0.5, r2.data()); // uh x uw
+
+    std::vector<u8> s1(std::size_t(uh) * uw);
+    sangnom(r2.data(), uh, uw, 48, s1.data());                      // uh x uw
+    std::vector<u8> t2(std::size_t(uw) * uh);
+    transpose(s1.data(), uh, uw, t2.data());                        // uw x uh
+    std::vector<u8> s2(std::size_t(uw) * uh);
+    sangnom(t2.data(), uw, uh, 48, s2.data());                      // uw x uh
+
+    out.resize(std::size_t(w) * h);
+    resample2D(s2.data(), uw, uh, w, h, out.data());                // w x h
+}
+
+// Level-2 AA step: the chain above plus Repair(2) against the original luma.
+static void aaStep2(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
+{
+    std::vector<u8> ref = plane;                    // Repair reference = pre-AA luma
+    std::vector<u8> aa;
+    aaChain2(plane.data(), w, h, p, aa);
     repair2(aa.data(), ref.data(), w, h, aa.data());
     plane = std::move(aa);
 }
@@ -147,8 +216,15 @@ void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
                 std::fprintf(stderr, "error: --aa needs w,h >= 8 (current %d x %d)\n", w, h);
                 std::exit(1);
             }
-            aaStep(p, plane, w, h);
-            std::snprintf(name, sizeof name, "AA");
+            if (st.aaLevel == 2) {
+                // odd 3/2-scaled working heights are rounded to even inside the
+                // chain, so any w,h >= 8 is accepted
+                aaStep2(p, plane, w, h);
+                std::snprintf(name, sizeof name, "AA(2)");
+            } else {
+                aaStep(p, plane, w, h);
+                std::snprintf(name, sizeof name, "AA");
+            }
             break;
         case StepKind::Denoise: {
             NlmeansParams np;               // fixed config: a=2, s=4, wmode=3, wref=1

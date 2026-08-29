@@ -6,8 +6,12 @@
 
 `imagepolish` 将 VapourSynth / AviSynth 生态中常用的图像滤镜（抗锯齿、降噪、去光晕、去色带、锐化、缩放）以独立 C++ 实现整合为一个命令行程序用于图像处理。
 
+![ImagePolish 处理效果](preview/img.webp)
+
+**上图所用参数：**
+
 ```bash
-imagepolish -i input.png --deband --aa -o output.png
+imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen --dehalo --denoise
 ```
 
 
@@ -58,8 +62,8 @@ imagepolish -i a.png -i b.png -i c.png --deband y=40
 |---|---|
 | `--resize WxH` | spline36 缩放，一侧可省略（`1920x` / `x1080`），另一侧按原宽高比计算 |
 | `--denoise [N]` | NLMeans 降噪，`N` 为滤波强度 `h`（`1~8`，默认 `5`） |
-| `--deband [name=value,...]` | 去色带（neo_f3kdb，sample_mode=2）：`range`（`0~255`，默认 `24`）、`y`（`0~511`，默认 `72`）、`cbcr`（`0~511`，默认 `32`） |
-| `--aa` | 去锯齿：EEDI2 链（两遍方向插值 + spline36 重采样）+ Repair 模式 2，参数固定 |
+| `--deband [name=value,...]` | 去色带（neo_f3kdb，sample_mode=2），`range`（`0~255`，默认 `24`）、`y`（`0~511`，默认 `72`）、`cbcr`（`0~511`，默认 `32`） |
+| `--aa [N]` | 去锯齿，`N` 为强度（1、2，默认2） |
 | `--sharpen [s]` | CAS 锐化，`s` 为 sharpness（`0~1`，默认 `0.7`） |
 | `--dehalo` | 去光晕，参数固定 |
 
@@ -76,6 +80,8 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 
 - 滤镜顺序推荐按照上方的滤镜表格从上到下排，比如去锯齿不要放在降噪前。这样是为了取得更好的处理效果。
 
+- aa去锯齿滤镜强度2虽然效果很好，但是会让画面微微变糊，可以适当增加一点锐化
+
 - deband推荐使用两次以达到更有效地处理不同大小的色带的目的，比如：
 
   ```bash
@@ -85,7 +91,7 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 - 如果你不懂具体滤镜的用法，也可以使用下面这个万能参数：
 
   ```bash
-  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen --dehalo --quality 92
+  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen 0.9 --dehalo --quality 92
   ```
 
 

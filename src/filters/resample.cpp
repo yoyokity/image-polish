@@ -75,13 +75,21 @@ void transpose(const u8 *src, int w, int h, u8 *dst)
 // aligned (shift = 0); implemented as two separable passes
 void resample2D(const u8 *src, int w, int h, int nw, int nh, u8 *dst)
 {
-    // horizontal: transpose -> vertical resample (w -> nw) -> transpose back
+    resample2DShift(src, w, h, nw, nh, 0.0, 0.0, dst);
+}
+
+// same, but with independent half-pixel shifts (fmtconv sx/sy semantics,
+// in input pixels); force-inline free, single caller in the AA2 chain
+void resample2DShift(const u8 *src, int w, int h, int nw, int nh,
+                     double sx, double sy, u8 *dst)
+{
+    // horizontal: transpose -> vertical resample (w -> nw, shift sx) -> transpose back
     std::vector<u8> t1(std::size_t(h) * w);
     transpose(src, w, h, t1.data());                        // h x w
     std::vector<u8> t2(std::size_t(h) * nw);
-    resampleV(t1.data(), h, w, nw, 0.0, t2.data());         // h x nw
+    resampleV(t1.data(), h, w, nw, sx, t2.data());          // h x nw
     std::vector<u8> tmp(std::size_t(nw) * h);
     transpose(t2.data(), h, nw, tmp.data());                // nw x h
-    // vertical
-    resampleV(tmp.data(), nw, h, nh, 0.0, dst);             // nw x nh
+    // vertical (shift sy)
+    resampleV(tmp.data(), nw, h, nh, sy, dst);              // nw x nh
 }

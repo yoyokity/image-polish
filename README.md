@@ -6,8 +6,12 @@
 
 `imagepolish` packs the image filters commonly used in the VapourSynth / AviSynth ecosystem (anti-aliasing, denoise, dehalo, deband, sharpen, resize) into a single command-line program, implemented from scratch in C++.
 
+![ImagePolish demo result](preview/img.webp)
+
+**Parameters used for the image above:**
+
 ```bash
-imagepolish -i input.png --deband --aa -o output.png
+imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa 2 --sharpen --dehalo --denoise
 ```
 
 
@@ -59,7 +63,7 @@ Without `-o`, the output is `<input basename>_output.<same extension>` (e.g. `in
 | `--resize WxH` | spline36 resize; one side may be omitted (`1920x` / `x1080`), the other is kept proportional |
 | `--denoise [N]` | NLMeans denoise; `N` is the strength `h` (`1~8`, default `5`) |
 | `--deband [name=value,...]` | neo_f3kdb deband (sample_mode=2): `range` (`0~255`, default `24`), `y` (`0~511`, default `72`), `cbcr` (`0~511`, default `32`) |
-| `--aa` | Anti-aliasing: EEDI2 chain (two directional interpolations + spline36 resample) + Repair mode 2, fixed parameters |
+| `--aa [N]` | Anti-aliasing; `N` is the strength (`1`, `2`, default `2`) |
 | `--sharpen [s]` | CAS sharpen; `s` is sharpness (`0~1`, default `0.7`) |
 | `--dehalo` | Dehalo, fixed parameters |
 
@@ -76,6 +80,8 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 
 - Order filters from top to bottom of the table above for best results (e.g. do not put anti-aliasing before denoise).
 
+- AA strength 2 gives excellent results but slightly softens the image; a bit of sharpening compensates for it.
+
 - For better banding removal across different band sizes, run deband twice:
 
   ```bash
@@ -85,7 +91,7 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 - If you are not sure which filters to use, this one-liner covers everything:
 
   ```bash
-  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen --dehalo --quality 92
+  imagepolish -i in.png --denoise --deband range=12,y=60,cbcr=24 --deband range=24,y=40,cbcr=16 --aa --sharpen 0.9 --dehalo --quality 92
   ```
 
 
