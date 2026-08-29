@@ -105,16 +105,16 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 >
 > Python 3.x with pip. `pip install ziglang` installs the whole toolchain (zig cc) together with the runtimes for every target platform — no LLVM / MinGW installation and no PATH setup needed.
 
-VS Code users: just run the build task (`Ctrl+Shift+B`): `build` compiles for the current platform, `build all platforms` cross-compiles every target.
+VS Code users: run the `build` task (`Ctrl+Shift+B`) for the current platform, `build all platforms` to cross-compile every target.
 
 **From the command line:**
 
 ```bash
-python build.py          # current platform -> out/imagepolish.exe
-python build.py --all    # all platforms -> out/imagepolish-<version>-<target>[.exe]
+python build.py        # build for the current platform
+python build.py -all   # build all platforms
 ```
 
-The version lives in a single place, `src/version.h` (check it with `--version`); the build script also removes the `.pdb` debug symbols that Windows targets produce. See `build.py` for the list of target platforms covered by `--all`.
+The version lives in a single place, `src/version.h` (check it with `--version`); the build script also removes the `.pdb` debug symbols that Windows targets produce. See `build.py` for the list of target platforms.
 
 
 

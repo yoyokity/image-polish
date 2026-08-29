@@ -105,13 +105,13 @@ imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
 >
 > Python 3.x 与 pip。`pip install ziglang` 一个包即自带完整编译器（zig cc）与各目标平台的运行库，无需额外安装 LLVM / MinGW、也无需配置 PATH。
 
-VS Code 用户直接运行 build 任务（`Ctrl+Shift+B`）即可：`build` 构建当前平台，`build all platforms` 交叉编译全部目标平台
+VS Code 用户直接运行 build 任务（`Ctrl+Shift+B`）构建当前平台；全平台发布用 `build all platforms` 任务。
 
 **命令行构建：**
 
 ```bash
-python build.py          # 当前平台 -> out/imagepolish.exe
-python build.py --all    # 全平台 -> out/imagepolish-<版本>-<目标平台>[.exe]
+python build.py        # 构建当前平台
+python build.py -all   # 构建全平台
 ```
 
 

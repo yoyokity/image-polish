@@ -19,7 +19,7 @@
         {
             "label": "build",
             "type": "shell",
-            "detail": "Build imagepolish.exe for the current platform (python build.py), removing .pdb debug symbols. Default task (Ctrl+Shift+B).",
+            "detail": "Build imagepolish for the current platform (python build.py) -> out/imagepolish.exe. Default task (Ctrl+Shift+B).",
             "command": "python",
             "args": [
                 "build.py"
@@ -55,7 +55,7 @@
         {
             "label": "build all platforms",
             "type": "shell",
-            "detail": "Cross-compile imagepolish for all target platforms (python build.py --all) into out/ with version-tagged names.",
+            "detail": "Cross-compile imagepolish for all target platforms and zip each (python build.py --all) -> out/imagepolish-<version>-<target>.zip.",
             "command": "python",
             "args": [
                 "build.py",

@@ -29,9 +29,9 @@
  *            -v / --version, -h / --help
  *
  * Build (see build.py):
- *   python build.py            current platform -> out/imagepolish.exe
- *   python build.py --all      cross-compile all platforms ->
- *                              out/imagepolish-<version>-<target>[.exe]
+ *   python build.py            build for the current platform -> out/imagepolish.exe
+ *   python build.py --all      cross-compile all platforms and zip each ->
+ *                              out/imagepolish-<version>-<target>.zip
  */
 
 #include <cstdio>
