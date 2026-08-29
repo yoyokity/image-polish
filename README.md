@@ -44,7 +44,9 @@ out/aa.exe -i input.png [-o output.png] [--aa] [--denoise N]
   灰度（1 通道）或彩色（3 通道）均可。
 - 输出格式：由 `-o` 的扩展名决定：`.png`、`.bmp`、`.tga`、`.jpg/.jpeg`,
   以及 `.pgm`（灰度）/ `.ppm` / `.pnm`（彩色）。默认 PNG。省略 `-o` 时自动
-  生成为 `<输入名>_output.<输入扩展名>`（沿用输入格式）。
+  生成为 `<输入名>_output.<输入扩展名>`（沿用输入格式）。JPG 输出质量
+  默认 80（`1..100`），用 `--quality N` 调整（仅对 `.jpg/.jpeg` 生效，
+  其它格式忽略该参数）。
 - 灰度图：直接在整幅上按顺序执行选中的步骤。
 - 彩色图：取 BT.601 全范围亮度做处理；色度不走有损的 8 位 YUV 量化，而是把
   「亮度变化量」加到原图 RGB 的三个通道上（等价于原脚本 ShufflePlanes
@@ -81,8 +83,10 @@ out/aa.exe -i in.png -o out.png --denoise 5 --aa
 
 ## 编译
 
-任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`
-（main / eedi2 / resample / repair / imageio / nlmeans / dehalo / cas / deband），构建产物输出到 `out/`：
+任意 C++17 编译器，无第三方库（stb_image 已内置）。源码按模块拆在 `src/`：
+框架在 `src/` 根（main / chain 处理链 / color 颜色辅助 / imageio 图像 I/O /
+common / pfor），滤镜算法在 `src/filters/`
+（eedi2 / resample / repair / nlmeans / dehalo / cas / deband），构建产物输出到 `out/`：
 
 VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run Build Task`），
 会自动创建 `out/` 目录再编译。
@@ -93,26 +97,23 @@ VS Code 用户直接运行 build 任务（`Ctrl+Shift+B` 或 `Terminal → Run B
 x86_64 版本，解压后把 `bin` 目录加进 PATH），编译时用 `--target` 指定 target：
 
 ```
-clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -o out/aa.exe \
-    src/main.cpp src/eedi2.cpp src/resample.cpp src/repair.cpp src/imageio.cpp \
-    src/nlmeans.cpp src/dehalo.cpp src/cas.cpp src/deband.cpp
+clang++ --target=x86_64-w64-windows-gnu -O2 -std=c++17 -Isrc -o out/aa.exe \
+    src/main.cpp src/chain.cpp src/color.cpp src/imageio.cpp src/filters/*.cpp
 ```
 
 或者直接用 MinGW-w64 自带的 g++：
 
 ```
-g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp \
-    src/dehalo.cpp src/cas.cpp src/deband.cpp
+g++ -O2 -std=c++17 -Isrc -o out/aa.exe src/main.cpp src/chain.cpp \
+    src/color.cpp src/imageio.cpp src/filters/*.cpp
 ```
 
 没有安装 MinGW 时，可用 pip 安装的 ziglang 自带的 clang 编译：
 
 ```
 python -m pip install ziglang
-python -m ziglang c++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
-    src/resample.cpp src/repair.cpp src/imageio.cpp src/nlmeans.cpp \
-    src/dehalo.cpp src/cas.cpp src/deband.cpp
+python -m ziglang c++ -O2 -std=c++17 -Isrc -o out/aa.exe src/main.cpp \
+    src/chain.cpp src/color.cpp src/imageio.cpp src/filters/*.cpp
 ```
 
 ## 实现要点

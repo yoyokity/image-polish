@@ -11,4 +11,7 @@ struct Image {
 };
 
 bool loadImage(const std::string &path, Image &img);
-bool saveImage(const std::string &path, const Image &img);
+
+// Save an image; the format comes from the file extension. `jpegQuality`
+// (1..100) applies to .jpg/.jpeg output only; all other formats ignore it.
+bool saveImage(const std::string &path, const Image &img, int jpegQuality);

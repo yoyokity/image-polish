@@ -23,279 +23,27 @@
  *   output is <input basename>_output.<same ext>.
  *   options: --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
+ *            --quality N (JPEG output quality, 1..100, default 80),
  *            -h / --help
  *
  * Build:
- *   g++ -O2 -std=c++17 -o out/aa.exe src/main.cpp src/eedi2.cpp \
- *       src/resample.cpp src/repair.cpp src/imageio.cpp src/deband.cpp
+ *   g++ -O2 -std=c++17 -Isrc -o out/aa.exe src/main.cpp src/chain.cpp \
+ *       src/color.cpp src/imageio.cpp src/filters/eedi2.cpp \
+ *       src/filters/resample.cpp src/filters/repair.cpp \
+ *       src/filters/nlmeans.cpp src/filters/dehalo.cpp src/filters/cas.cpp \
+ *       src/filters/deband.cpp
  */
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
-#include "common.h"
-#include "cas.h"
-#include "deband.h"
-#include "dehalo.h"
-#include "eedi2.h"
+#include "chain.h"
+#include "color.h"
+#include "filters/eedi2.h"
 #include "imageio.h"
-#include "nlmeans.h"
-#include "repair.h"
-#include "resample.h"
-
-// ---------------------------------------------------------------------------
-// Color helpers (BT.601 luma; chroma of the original image is kept exact)
-// ---------------------------------------------------------------------------
-static inline u8 clamp8(int v) { return u8(std::max(0, std::min(255, v))); }
-
-// BT.601 full-range luma of an RGB image (8-bit).
-static void rgbLuma(const u8 *rgb, int n, std::vector<u8> &y)
-{
-    y.resize(n);
-    for (int i = 0; i < n; i++) {
-        const double R = rgb[3 * i + 0], G = rgb[3 * i + 1], B = rgb[3 * i + 2];
-        y[i] = clamp8(int(0.299 * R + 0.587 * G + 0.114 * B + 0.5));
-    }
-}
-
-// Reconstruct RGB after the luma-only AA pass: keep the original chroma by
-// adding the luma change (yAA - yOrig) to every channel of the original pixel.
-// This is exactly "replace luma, keep chroma" with unquantized chroma, i.e.
-// the same semantics as the VapourSynth ShufflePlanes([aa, src], YUV) chain;
-// flat regions roundtrip with zero error (only the rare yOrig == x.5 case
-// shifts all channels by +1).
-static void applyLuma(const std::vector<u8> &yAA, const u8 *origRgb, int n, std::vector<u8> &rgb)
-{
-    rgb.resize(std::size_t(n) * 3);
-    for (int i = 0; i < n; i++) {
-        const double R = origRgb[3 * i + 0], G = origRgb[3 * i + 1], B = origRgb[3 * i + 2];
-        const double d = double(yAA[i]) - (0.299 * R + 0.587 * G + 0.114 * B);
-        rgb[3 * i + 0] = clamp8(int(R + d + 0.5));
-        rgb[3 * i + 1] = clamp8(int(G + d + 0.5));
-        rgb[3 * i + 2] = clamp8(int(B + d + 0.5));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The AA chain on a single luma plane (w*h gray8 -> w*h gray8)
-// ---------------------------------------------------------------------------
-static void aaChain(const u8 *gray, int w, int h, const Eedi2Params &p, std::vector<u8> &out)
-{
-    Eedi2 eedi2(p);
-
-    // pass 1: vertical
-    std::vector<u8> a1(std::size_t(w) * h * 2);
-    eedi2.run(gray, w, h, a1.data());                       // w x 2h
-    std::vector<u8> r1(std::size_t(w) * h);
-    resampleV(a1.data(), w, h * 2, h, -0.5, r1.data());     // w x h
-
-    // pass 2: horizontal (transpose -> double -> resample -> transpose back)
-    std::vector<u8> t1(std::size_t(h) * w);
-    transpose(r1.data(), w, h, t1.data());                  // h x w
-    std::vector<u8> a2(std::size_t(h) * w * 2);
-    eedi2.run(t1.data(), h, w, a2.data());                  // h x 2w
-    std::vector<u8> r2(std::size_t(h) * w);
-    resampleV(a2.data(), h, w * 2, w, -0.5, r2.data());     // h x w
-    out.resize(std::size_t(w) * h);
-    transpose(r2.data(), h, w, out.data());                 // w x h
-}
-
-// ---------------------------------------------------------------------------
-// Processing steps, applied to the luma plane in command-line order
-// ---------------------------------------------------------------------------
-enum class StepKind { AA, Denoise, Resize, Dehalo, Sharpen, Deband };
-
-struct Step {
-    StepKind kind;
-    float h = 0.0f;       // NLMeans strength for Denoise steps
-    int rw = -1, rh = -1; // Resize targets (-1: keep proportional)
-    int dbr = 24, dby = 72, dbc = 32; // Deband range / luma / chroma thresholds
-};
-
-// Anti-aliasing step: the EEDI2 chain plus Repair(2), parameters fixed to the
-// defaults matching the original script.
-static void aaStep(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
-{
-    std::vector<u8> ref = plane;                    // Repair reference = pre-AA luma
-    std::vector<u8> aa;
-    aaChain(plane.data(), w, h, p, aa);
-    repair2(aa.data(), ref.data(), w, h, aa.data());
-    plane = std::move(aa);
-}
-
-// Parse "--resize WxH | Wx | xH"; a missing side (-1) is kept proportional.
-static void parseResize(const char *s, int &rw, int &rh)
-{
-    std::string spec = s;
-    std::transform(spec.begin(), spec.end(), spec.begin(),
-                   [](char c) { return char(std::tolower((unsigned char)c)); });
-    const auto x = spec.find('x');
-    if (x == std::string::npos) {
-        std::fprintf(stderr, "error: --resize expects WxH, Wx or xH (e.g. 1920x1080)\n");
-        std::exit(1);
-    }
-    const std::string a = spec.substr(0, x), b = spec.substr(x + 1);
-    if (a.empty() && b.empty()) {
-        std::fprintf(stderr, "error: --resize needs at least one dimension\n");
-        std::exit(1);
-    }
-    auto side = [](const std::string &v) -> int {
-        if (v.empty())
-            return -1;
-        const int n = std::atoi(v.c_str());
-        if (n <= 0) {
-            std::fprintf(stderr, "error: --resize dimensions must be positive\n");
-            std::exit(1);
-        }
-        return n;
-    };
-    rw = side(a);
-    rh = side(b);
-}
-
-// Parse "--deband [<name>=<value>,...]" with names range (0..255), y and
-// cbcr (0..511). Omitted names keep their defaults (24, 72, 32); any order is
-// allowed. Unknown names, duplicates, missing '=' or empty values are errors.
-static void parseDeband(const char *s, int &range, int &y, int &cbcr)
-{
-    bool seen[3] = { false, false, false };
-    const std::string spec = s;
-    size_t pos = 0;
-    while (pos <= spec.size()) {
-        const size_t comma = spec.find(',', pos);
-        const std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        if (tok.empty()) {
-            std::fprintf(stderr, "error: --deband expects <name>=<value> pairs (e.g. y=40)\n");
-            std::exit(1);
-        }
-        const size_t eq = tok.find('=');
-        if (eq == std::string::npos) {
-            std::fprintf(stderr, "error: --deband '%s' is not a <name>=<value> pair (e.g. y=40)\n", tok.c_str());
-            std::exit(1);
-        }
-        const std::string name = tok.substr(0, eq);
-        const std::string val = tok.substr(eq + 1);
-        if (val.empty()) {
-            std::fprintf(stderr, "error: --deband missing value after '%s='\n", name.c_str());
-            std::exit(1);
-        }
-        const int n = std::atoi(val.c_str());
-        int idx = name == "range" ? 0 : name == "y" ? 1 : name == "cbcr" ? 2 : -1;
-        if (idx < 0) {
-            std::fprintf(stderr, "error: --deband unknown parameter '%s' (expect range, y or cbcr)\n", name.c_str());
-            std::exit(1);
-        }
-        if (seen[idx]) {
-            std::fprintf(stderr, "error: --deband parameter '%s' given more than once\n", name.c_str());
-            std::exit(1);
-        }
-        seen[idx] = true;
-        (idx == 0 ? range : idx == 1 ? y : cbcr) = n;
-        if (comma == std::string::npos)
-            break;
-        pos = comma + 1;
-    }
-}
-
-// Runs `steps` on the plane. In batch mode (accMs != nullptr) the per-step wall
-// time is accumulated into stepMs/stepNames instead of printed per file; the
-// totals are reported once by main() after all inputs.
-static void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
-                     const std::vector<Step> &steps, std::vector<u8> *refRgb,
-                     std::vector<double> *accMs = nullptr,
-                     std::vector<std::string> *accNames = nullptr)
-{
-    int idx = 0;
-    for (const Step &st : steps) {
-        const auto t0 = std::chrono::steady_clock::now();
-        char name[40];
-        switch (st.kind) {
-        case StepKind::AA:
-            if (w < 8 || h < 8) {
-                std::fprintf(stderr, "error: --aa needs w,h >= 8 (current %d x %d)\n", w, h);
-                std::exit(1);
-            }
-            aaStep(p, plane, w, h);
-            std::snprintf(name, sizeof name, "AA");
-            break;
-        case StepKind::Denoise: {
-            NlmeansParams np;               // fixed config: a=2, s=4, wmode=3, wref=1
-            np.h = st.h;
-            std::vector<u8> out(std::size_t(w) * h);
-            nlmeans(plane.data(), w, h, np, out.data());
-            plane = std::move(out);
-            std::snprintf(name, sizeof name, "NLMeans h=%g", st.h);
-            break;
-        }
-        case StepKind::Resize: {
-            int nw = st.rw, nh = st.rh;
-            if (nw < 0) nw = std::max(1, int(std::llround(double(nh) * w / h)));
-            if (nh < 0) nh = std::max(1, int(std::llround(double(nw) * h / w)));
-            std::vector<u8> out(std::size_t(nw) * nh);
-            resample2D(plane.data(), w, h, nw, nh, out.data());
-            plane = std::move(out);
-            if (refRgb) {
-                // keep the chroma reference size in lockstep so applyLuma stays paired
-                std::vector<u8> ch(std::size_t(w) * h), gen(std::size_t(nw) * nh);
-                std::vector<u8> scaled(std::size_t(nw) * nh * 3);
-                for (int c = 0; c < 3; c++) {
-                    for (int i = 0; i < w * h; i++)
-                        ch[i] = (*refRgb)[3 * i + c];
-                    resample2D(ch.data(), w, h, nw, nh, gen.data());
-                    for (int i = 0; i < nw * nh; i++)
-                        scaled[3 * i + c] = gen[i];
-                }
-                *refRgb = std::move(scaled);
-            }
-            w = nw;
-            h = nh;
-            std::snprintf(name, sizeof name, "Resize %dx%d", nw, nh);
-            break;
-        }
-        case StepKind::Dehalo: {
-            std::vector<u8> out(std::size_t(w) * h);
-            fineDehalo(plane.data(), w, h, out.data());
-            plane = std::move(out);
-            std::snprintf(name, sizeof name, "FineDehalo");
-            break;
-        }
-        case StepKind::Sharpen: {
-            std::vector<u8> out(std::size_t(w) * h);
-            cas(plane.data(), w, h, st.h, out.data());
-            plane = std::move(out);
-            std::snprintf(name, sizeof name, "CAS s=%g", st.h);
-            break;
-        }
-        case StepKind::Deband: {
-            DebandParams dp;
-            dp.range = st.dbr;
-            dp.y = st.dby;
-            dp.cbcr = st.dbc;
-            std::vector<u8> out(std::size_t(w) * h);
-            deband(plane.data(), w, h, dp, out.data());
-            plane = std::move(out);
-            std::snprintf(name, sizeof name, "Deband r=%d y=%d", st.dbr, st.dby);
-            break;
-        }
-        }
-        const double ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - t0).count();
-        ++idx;
-        if (accMs) {
-            (*accMs)[idx - 1] += ms;
-            if (accNames)
-                (*accNames)[idx - 1] = name;
-        } else {
-            std::printf("  step %d  %-16s %8.2f ms\n", idx, name, ms);
-        }
-    }
-}
+#include "filters/resample.h"
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -325,6 +73,8 @@ static void printHelp()
         "                        names: range (0..255), y (0..511), cbcr\n"
         "                        (0..511), defaults 24,72,32; omitted names\n"
         "                        keep their defaults, any order\n"
+        "  --quality <q>       JPEG output quality 1..100 (default 80);\n"
+        "                        only affects .jpg/.jpeg outputs\n"
         "\n"
         "Steps are executed in the order they appear on the command line;\n"
         "with no step the image is passed through unchanged.\n"
@@ -351,6 +101,7 @@ int main(int argc, char **argv)
     std::string output;
     std::string dumpEedi2, dumpRs;
     std::vector<Step> steps;
+    int jpegQuality = 80;
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -363,28 +114,31 @@ int main(int argc, char **argv)
         };
         if (a == "-i" || a == "--input") inputs.push_back(next("-i"));
         else if (a == "-o" || a == "--output") output = next("-o");
-        else if (a == "--aa") steps.push_back({StepKind::AA, 0.0f, -1, -1});
+        else if (a == "--aa") steps.push_back(Step::aa());
         else if (a == "--denoise") {
             float hv = 5.0f;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 hv = static_cast<float>(std::atof(argv[++i]));
-            steps.push_back({StepKind::Denoise, hv, -1, -1});
+            steps.push_back(Step::denoise(hv));
         } else if (a == "--sharpen") {
             float sv = 0.7f;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 sv = static_cast<float>(std::atof(argv[++i]));
-            steps.push_back({StepKind::Sharpen, sv, -1, -1});
+            steps.push_back(Step::sharpen(sv));
         } else if (a == "--resize") {
             int rw = 0, rh = 0;
             parseResize(next("--resize"), rw, rh);
-            steps.push_back({StepKind::Resize, 0.0f, rw, rh});
+            steps.push_back(Step::resize(rw, rh));
         }
-        else if (a == "--dehalo") steps.push_back({StepKind::Dehalo, 0.0f, -1, -1});
+        else if (a == "--dehalo") steps.push_back(Step::dehalo());
         else if (a == "--deband") {
             int r = 24, y = 72, c = 32;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 parseDeband(next("--deband"), r, y, c);
-            steps.push_back({StepKind::Deband, 0.0f, -1, -1, r, y, c});
+            steps.push_back(Step::deband(r, y, c));
+        }
+        else if (a == "--quality") {
+            jpegQuality = std::atoi(next("--quality"));
         }
         else if (a == "--dump-eedi2") dumpEedi2 = next("--dump-eedi2");
         else if (a == "--dump-rs") dumpRs = next("--dump-rs");
@@ -431,6 +185,10 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
+    }
+    if (jpegQuality < 1 || jpegQuality > 100) {
+        std::fprintf(stderr, "error: --quality must be in 1..100\n");
+        return 1;
     }
 
     Eedi2Params p;                       // fixed AA parameters (script defaults)
@@ -508,7 +266,7 @@ int main(int argc, char **argv)
         std::string out = output;
         if (out.empty())
             out = defaultOutput(input);
-        if (!saveImage(out, img)) {
+        if (!saveImage(out, img, jpegQuality)) {
             std::fprintf(stderr, "error: cannot write image '%s'\n", out.c_str());
             return 1;
         }

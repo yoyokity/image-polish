@@ -32,7 +32,7 @@ bool loadImage(const std::string &path, Image &img)
     return true;
 }
 
-bool saveImage(const std::string &path, const Image &img)
+bool saveImage(const std::string &path, const Image &img, int jpegQuality)
 {
     const std::string ext = [&]() {
         const auto pos = path.find_last_of('.');
@@ -48,7 +48,7 @@ bool saveImage(const std::string &path, const Image &img)
     if (ext == "tga")
         return stbi_write_tga(path.c_str(), img.w, img.h, img.ch, img.p.data()) != 0;
     if (ext == "jpg" || ext == "jpeg")
-        return stbi_write_jpg(path.c_str(), img.w, img.h, img.ch, img.p.data(), 95) != 0;
+        return stbi_write_jpg(path.c_str(), img.w, img.h, img.ch, img.p.data(), jpegQuality) != 0;
     if (ext == "pgm" || ext == "pnm" || ext == "ppm") {
         FILE *f = std::fopen(path.c_str(), "wb");
         if (!f)
