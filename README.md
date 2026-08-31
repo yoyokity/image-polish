@@ -70,8 +70,8 @@ Without `-o`, the output is `<input basename>_output.<same extension>` (e.g. `in
 | `--aa [N]` | Anti-aliasing; `N` is the strength (`1`, `2`, default `2`) |
 | `--sharpen [s]` | CAS sharpen; `s` is sharpness (`0~1`, default `0.7`) |
 | `--dehalo` | Dehalo, fixed parameters |
-| `--grain [h]` | Film grain; `h` is the noise variance (`0~100`, default `10`) |
 | `--model <name>` | ONNX super-resolution model; `<name>` is a file name or prefix under `models/`, e.g. `--model 2xGTv6`, `--model RealESRGAN_x2plus`. **(requires the `imagepolish-ai` build)** |
+| `--grain [h]` | Film grain; `h` is the noise variance (`0~100`, default `10`) |
 
 Examples:
 
