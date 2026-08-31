@@ -18,8 +18,9 @@ imagepolish -i input.png --denoise --deband range=12,y=60,cbcr=24 --deband range
 
 ## Features
 
-- **Filters combine freely**: EEDI2 anti-aliasing, NLMeans denoise, spline36 resize, FineDehalo, CAS sharpen and neo_f3kdb deband run in command-line order; steps can be repeated, omitted, and arranged arbitrarily.
+- **Filters combine freely**: EEDI2 anti-aliasing, NLMeans denoise, spline36 resize, FineDehalo, CAS sharpen, neo_f3kdb deband and ONNX super-resolution run in command-line order; steps can be repeated, omitted, and arranged arbitrarily.
 - **Lossless chroma**: chroma never goes through lossy 8-bit YUV quantization. The "luma delta" is added back to the original RGB — zero chroma loss, exactly matching the VapourSynth `ShufflePlanes` semantics.
+- **AI models available**: bundled RealESRGAN_x2plus, 2xGTv6, 2x_HSR models are available to use.
 - **Multi-file batch**: `-i` can be repeated; inputs are processed serially and each gets its own output.
 - **Multithreaded**: filters are processed in parallel threads.
 
@@ -33,6 +34,9 @@ imagepolish -i in.png --deband --aa
 
 # Denoise (strength 5) + resize to 1920 wide
 imagepolish -i in.png --resize 1920x --denoise 5 -o out.png
+
+# ONNX super-resolution x2 (2xGTv6 matches models/2xGTv6-cel_dynamic.onnx)
+imagepolish -i in.png --model 2xGTv6 -o out_2x.png
 
 # Batch process several images (-o is ignored; outputs are <name>_output.<ext>)
 imagepolish -i a.png -i b.png -i c.png --deband y=40
@@ -67,6 +71,7 @@ Without `-o`, the output is `<input basename>_output.<same extension>` (e.g. `in
 | `--sharpen [s]` | CAS sharpen; `s` is sharpness (`0~1`, default `0.7`) |
 | `--dehalo` | Dehalo, fixed parameters |
 | `--grain [h]` | Film grain; `h` is the noise variance (`0~100`, default `10`) |
+| `--model <name>` | ONNX super-resolution model; `<name>` is a file name or prefix under `models/`, e.g. `--model 2xGTv6`, `--model RealESRGAN_x2plus`. **(requires the `imagepolish-ai` build)** |
 
 Examples:
 
@@ -75,6 +80,7 @@ imagepolish -i in.png --deband               # defaults 24,72,32
 imagepolish -i in.png --deband y=40          # luma threshold only
 imagepolish -i in.png --deband range=16,cbcr=48
 imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
+imagepolish -i in.png --model 2xGTv6 --sharpen 0.7   # SR then sharpen
 ```
 
 ### Notes
@@ -115,8 +121,6 @@ python build.py -all   # build all platforms
 ```
 
 The version lives in a single place, `src/version.h` (check it with `--version`); the build script also removes the `.pdb` debug symbols that Windows targets produce. See `build.py` for the list of target platforms.
-
-
 
 ## Implementation
 

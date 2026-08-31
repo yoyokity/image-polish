@@ -25,6 +25,7 @@
  *            --mthresh N --lthresh N --vthresh N --maxd N --nt N --field N
  *            --repair N (0 disables Repair), --deband [range=,y=,cbcr=],
  *            --grain [h] (AddGrain noise variance, default 10),
+ *            --model <name> (ONNX super-resolution from models/),
  *            --quality N (JPEG output quality, 1..100, default 80),
  *            -v / --version, -h / --help
  *
@@ -42,6 +43,7 @@
 #include "chain.h"
 #include "color.h"
 #include "filters/eedi2.h"
+#include "filters/onnxsr.h"
 #include "imageio.h"
 #include "filters/resample.h"
 #include "version.h"
@@ -84,6 +86,15 @@ static void printHelp()
         "  --grain [<h>]         film grain (AddGrain); <h> is the noise\n"
         "                        variance std=h^0.5 (default 10), e.g. 20~100 for\n"
         "                        visible grain, 0 disables; seed derived from image\n"
+        "  --model <name>       super-resolution via an ONNX model (all bundled\n"
+        "                        models upscale x2, RGB); <name> is a path or a\n"
+        "                        bare name looked up in models/ (e.g. --model\n"
+        "                        2xGTv6 or --model 2x_HSR_V3_compact_fp16_op18);\n"
+        "                        odd input sides are padded to even and the\n"
+        "                        output is cropped accordingly; needs\n"
+        "                        onnxruntime.dll (Windows) or\n"
+        "                        libonnxruntime.so (Linux/macOS) next to the\n"
+        "                        executable\n"
         "  --quality <q>       JPEG output quality 1..100 (default 80);\n"
         "                        only affects .jpg/.jpeg outputs\n"
         "  -v, --version        print version and exit\n"
@@ -167,6 +178,23 @@ int main(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 parseDeband(next("--deband"), r, y, c);
             steps.push_back(Step::deband(r, y, c));
+        }
+        else if (a == "--model") {
+            std::string err;
+            const std::string path = resolveOnnxModel(next("--model"), err);
+            if (path.empty()) {
+                if (onnxRuntimeAvailable()) {
+                    std::fprintf(stderr, "error: --model: %s\n", err.c_str());
+                    return 1;
+                }
+                // The plain packages ship without the onnxruntime library, so
+                // the ONNX feature is not part of them: warn and skip instead
+                // of failing on model resolution.
+                onnxWarn("warning: --model: ONNX is not included in this package "
+                         "(onnxruntime library missing); step skipped");
+                continue;
+            }
+            steps.push_back(Step::onnxSr(path));
         }
         else if (a == "--quality") {
             jpegQuality = std::atoi(next("--quality"));

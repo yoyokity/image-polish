@@ -1,11 +1,13 @@
 #include "chain.h"
 
+#include "color.h"
 #include "filters/cas.h"
 #include "filters/deband.h"
 #include "filters/dehalo.h"
 #include "filters/eedi2.h"
 #include "filters/grain.h"
 #include "filters/nlmeans.h"
+#include "filters/onnxsr.h"
 #include "filters/repair.h"
 #include "filters/resample.h"
 #include "filters/sangnom.h"
@@ -211,6 +213,7 @@ void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
     for (const Step &st : steps) {
         const auto t0 = std::chrono::steady_clock::now();
         char name[40];
+        bool skipped = false;
         switch (st.kind) {
         case StepKind::AA:
             if (w < 8 || h < 8) {
@@ -293,10 +296,59 @@ void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
             std::snprintf(name, sizeof name, "Deband r=%d y=%d", st.dbr, st.dby);
             break;
         }
+        case StepKind::OnnxSr: {
+            // ONNX SR models are trained on RGB, so the step runs on the full
+            // color image: luma plane + chroma reference are recombined to RGB
+            // (or the gray plane is replicated), the model runs, and the
+            // result replaces both the luma plane and the chroma reference.
+            std::vector<u8> rgb;
+            if (refRgb) {
+                applyLuma(plane, refRgb->data(), w * h, rgb);
+            } else {
+                rgb.resize(std::size_t(w) * h * 3);
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++) {
+                        const u8 v = plane[std::size_t(y) * w + x];
+                        rgb[(std::size_t(y) * w + x) * 3 + 0] = v;
+                        rgb[(std::size_t(y) * w + x) * 3 + 1] = v;
+                        rgb[(std::size_t(y) * w + x) * 3 + 2] = v;
+                    }
+            }
+            std::vector<u8> sr;
+            int nw = 0, nh = 0;
+            std::string oerr;
+            const OnnxSrStatus rc = runOnnxSr(st.model, rgb.data(), w, h, sr, nw, nh, oerr);
+            if (rc == OnnxSrStatus::Skip) {
+                onnxWarn("warning: --model: " + oerr + "; step skipped");
+                skipped = true;
+                break;
+            }
+            if (rc == OnnxSrStatus::Error) {
+                std::fprintf(stderr, "error: --model (%s): %s\n", st.model.c_str(), oerr.c_str());
+                std::exit(1);
+            }
+            if (refRgb) {
+                rgbLuma(sr.data(), nw * nh, plane);
+                *refRgb = std::move(sr);
+            } else {
+                rgbLuma(sr.data(), nw * nh, plane);   // gray stays gray: keep the luma
+            }
+            w = nw;
+            h = nh;
+            std::string mname = st.model;
+            const auto slash = mname.find_last_of("/\\");
+            if (slash != std::string::npos)
+                mname = mname.substr(slash + 1);
+            std::snprintf(name, sizeof name, "ONNX-SR%s%s", mname.empty() ? "" : " ",
+                          mname.c_str());
+            break;
+        }
         }
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count();
         ++idx;
+        if (skipped)
+            continue;                       // warned above; keep step numbering
         if (accMs) {
             (*accMs)[idx - 1] += ms;
             if (accNames)

@@ -18,8 +18,9 @@ imagepolish -i input.png -denoise --deband range=12,y=60,cbcr=24 --deband range=
 
 ## 特性
 
-- **滤镜可任意组合**：EEDI2 抗锯齿、NLMeans 降噪、spline36 缩放、FineDehalo 去光晕、CAS 锐化、neo_f3kdb 去色带；按命令行出现顺序依次执行，可重复、可省略、顺序任意。
+- **滤镜可任意组合**：EEDI2 抗锯齿、NLMeans 降噪、spline36 缩放、FineDehalo 去光晕、CAS 锐化、neo_f3kdb 去色带、ONNX 超分；按命令行出现顺序依次执行，可重复、可省略、顺序任意。
 - **色彩高保真**：色度不经过有损的8 位 YUV 量化，而是把「亮度变化量」加回原图 RGB——色度零损失，与 VapourSynth `ShufflePlanes` 语义严格对应。
+- **可用AI模型**：内置 RealESRGAN_x2plus、2xGTv6、2x_HSR 等模型可用。
 - **多文件批量处理**：`-i` 可重复传入，串行批处理，每个输入自动生成对应输出。
 - **多线程加速**：滤镜处理通过多线程来加速。
 
@@ -33,6 +34,9 @@ imagepolish -i in.png --deband --aa
 
 # 降噪（强度 5）+ 缩放到 1920 宽
 imagepolish -i in.png --resize 1920x --denoise 5 -o out.png
+
+# ONNX 超分 x2（2xGTv6 会匹配到 models/2xGTv6-cel_dynamic.onnx）
+imagepolish -i in.png --model 2xGTv6 -o out_2x.png
 
 # 批量处理多张图（-o 被忽略，输出为 <输入名>_output.<原扩展名>）
 imagepolish -i a.png -i b.png -i c.png --deband y=40
@@ -66,6 +70,7 @@ imagepolish -i a.png -i b.png -i c.png --deband y=40
 | `--aa [N]` | 去锯齿，`N` 为强度（1、2，默认2） |
 | `--sharpen [s]` | CAS 锐化，`s` 为 sharpness（`0~1`，默认 `0.7`） |
 | `--dehalo` | 去光晕，参数固定 |
+| `--model <name>` | ONNX 超分模型，`<name>` 可以是 `models/` 下的文件名或前缀，如 `--model 2xGTv6`、`--model RealESRGAN_x2plus`。**（需下载imagepolish-ai打包版本）** |
 | `--grain [h]` | 胶片颗粒，`h` 为噪声方差（`0~100`，默认 `10`） |
 
 示例：
@@ -75,6 +80,7 @@ imagepolish -i in.png --deband               # 默认 24,72,32
 imagepolish -i in.png --deband y=40          # 只调亮度阈值
 imagepolish -i in.png --deband range=16,cbcr=48
 imagepolish -i in.png --resize 1920x --aa --deband --denoise 5 -o out.png
+imagepolish -i in.png --model 2xGTv6 --sharpen 0.7   # 超分后锐化
 ```
 
 ### 说明
