@@ -2,6 +2,7 @@
 """Build imagepolish with zig cc.
 
     python build.py            build for the current platform -> out/imagepolish[.exe]
+                              plus the ONNX runtime and the models/ folder
     python build.py --all      cross-compile all target platforms and zip each -> out/ zips
 
 The release version is read from src/version.h (single source of truth). In
@@ -374,7 +375,15 @@ def main():
         target, name, variants = spec
         zig(target, str(out / name))
         install_runtime(out, target, variants[0][1])   # default = GPU-capable
-        print(f"  {target}: {out / name}")
+        # ship the models/ folder next to the binary (like the -ai zips)
+        models = sorted((ROOT / "models").glob("*.onnx"))
+        dest = out / "models"
+        if dest.exists():
+            rm_retry(dest)
+        dest.mkdir(parents=True)
+        for m in models:
+            shutil.copy2(m, dest / m.name)
+        print(f"  {target}: {out / name} (+ models/)")
 
     # drop debug symbol files produced alongside Windows targets
     for p in out.glob("*.pdb"):
