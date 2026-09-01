@@ -334,6 +334,7 @@ int main(int argc, char **argv)
             return 1;
         }
         std::printf("ok: %d x %d -> %d x %d (%s)\n", img.w, img.h, img.w, img.h, out.c_str());
+        std::fflush(stdout);  // emit the ok line immediately, also in batch mode
     }
 
     if (batch && !steps.empty()) {
