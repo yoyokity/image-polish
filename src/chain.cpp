@@ -18,7 +18,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -69,19 +68,21 @@ static void aaStep(const Eedi2Params &p, std::vector<u8> &plane, int w, int h)
 //   aa = fmtc.resample(aa, clip.width, clip.height)        // back to w x h
 //   (bitdepth to 8 is a no-op: the whole chain runs in gray8 here)
 //
-// The 3/2-scaled working size is rounded up to an even number so both SangNom
-// passes (which reject odd heights) work for any w,h; for sizes where 3w/2 is
-// already even (w or h = 0 or 3 mod 4) this changes nothing. The 3/4 downscale
-// keeps the floor division of the reference; the resamplers absorb the residue.
 // ---------------------------------------------------------------------------
+static int workSize(int n)
+{
+    // 3/2 scale, rounded up to an even number so both SangNom passes (which
+    // reject odd heights) work for any w,h; even sizes pass through unchanged.
+    const int s = n * 3 / 2;
+    return s + (s & 1);
+}
+
 static void aaChain2(const u8 *gray, int w, int h, const Eedi2Params &p, std::vector<u8> &out)
 {
-    int uw = w * 3 / 2;
-    if (uw & 1)
-        uw += 1;
-    int uh = h * 3 / 2;
-    if (uh & 1)
-        uh += 1;
+    const int uw = workSize(w);
+    const int uh = workSize(h);
+    // 3/4 downscale keeps the floor division of the reference; the resamplers
+    // absorb the residue.
     const int dw = w * 3 / 4;
     const int dh = h * 3 / 4;
 
@@ -158,17 +159,29 @@ void parseResize(const char *s, int &rw, int &rh)
     rh = side(b);
 }
 
+// Parameter index for a --deband name: 0 range, 1 y, 2 cbcr; -1 if unknown.
+static int debandIndex(const std::string &name)
+{
+    if (name == "range")
+        return 0;
+    if (name == "y")
+        return 1;
+    if (name == "cbcr")
+        return 2;
+    return -1;
+}
+
 // Parse "--deband [<name>=<value>,...]" with names range (0..255), y and
 // cbcr (0..511). Omitted names keep their defaults (24, 72, 32); any order is
 // allowed. Unknown names, duplicates, missing '=' or empty values are errors.
 void parseDeband(const char *s, int &range, int &y, int &cbcr)
 {
-    bool seen[3] = { false, false, false };
+    bool seen[3] = {};
     const std::string spec = s;
-    size_t pos = 0;
-    while (pos <= spec.size()) {
+    for (size_t pos = 0;;) {
         const size_t comma = spec.find(',', pos);
-        const std::string tok = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        const std::string tok = spec.substr(pos, comma == std::string::npos
+                                                ? std::string::npos : comma - pos);
         if (tok.empty()) {
             std::fprintf(stderr, "error: --deband expects <name>=<value> pairs (e.g. y=40)\n");
             std::exit(1);
@@ -185,7 +198,7 @@ void parseDeband(const char *s, int &range, int &y, int &cbcr)
             std::exit(1);
         }
         const int n = std::atoi(val.c_str());
-        int idx = name == "range" ? 0 : name == "y" ? 1 : name == "cbcr" ? 2 : -1;
+        const int idx = debandIndex(name);
         if (idx < 0) {
             std::fprintf(stderr, "error: --deband unknown parameter '%s' (expect range, y or cbcr)\n", name.c_str());
             std::exit(1);
@@ -195,7 +208,11 @@ void parseDeband(const char *s, int &range, int &y, int &cbcr)
             std::exit(1);
         }
         seen[idx] = true;
-        (idx == 0 ? range : idx == 1 ? y : cbcr) = n;
+        switch (idx) {
+        case 0: range = n; break;
+        case 1: y = n; break;
+        case 2: cbcr = n; break;
+        }
         if (comma == std::string::npos)
             break;
         pos = comma + 1;
@@ -305,14 +322,14 @@ void runSteps(const Eedi2Params &p, std::vector<u8> &plane, int &w, int &h,
             if (refRgb) {
                 applyLuma(plane, refRgb->data(), w * h, rgb);
             } else {
-                rgb.resize(std::size_t(w) * h * 3);
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++) {
-                        const u8 v = plane[std::size_t(y) * w + x];
-                        rgb[(std::size_t(y) * w + x) * 3 + 0] = v;
-                        rgb[(std::size_t(y) * w + x) * 3 + 1] = v;
-                        rgb[(std::size_t(y) * w + x) * 3 + 2] = v;
-                    }
+                const std::size_t n = std::size_t(w) * h;
+                rgb.resize(n * 3);
+                for (std::size_t i = 0; i < n; i++) {
+                    const u8 v = plane[i];
+                    rgb[3 * i + 0] = v;
+                    rgb[3 * i + 1] = v;
+                    rgb[3 * i + 2] = v;
+                }
             }
             std::vector<u8> sr;
             int nw = 0, nh = 0;

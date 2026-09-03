@@ -59,11 +59,13 @@ SOURCES = [
     "src/filters/deband.cpp", "src/filters/sangnom.cpp", "src/filters/grain.cpp",
     "src/filters/onnxsr.cpp",
 ]
-COMMON = ["-O2", "-std=c++17", "-Wall", "-Wextra",
-          "-Wno-missing-field-initializers", "-Isrc"]
-# zig ships its own libc++ whose headers lack nullability annotations; without
-# this suppression -Wall -Wextra floods the build log on some targets.
-COMMON += ["-Wno-nullability-completeness"]
+COMMON = [
+    "-O2", "-std=c++17", "-Wall", "-Wextra",
+    "-Wno-missing-field-initializers", "-Isrc",
+    # zig ships its own libc++ whose headers lack nullability annotations;
+    # without this -Wall -Wextra floods the build log on some targets.
+    "-Wno-nullability-completeness",
+]
 
 # (zig target, binary file name, [(zip suffix, runtime kind), ...]) — the first
 # variant is the default (shipped next to the binary by "python build.py").
@@ -93,7 +95,7 @@ ORT_LINUX_GPU_FILES = ["libonnxruntime.so", "libonnxruntime_providers_cuda.so",
 
 
 def is_windows_target(target: str) -> bool:
-    return target.startswith("x86_64-windows") or target.startswith("aarch64-windows")
+    return "-windows-" in target
 
 
 def ort_arch(target: str) -> str:
@@ -103,6 +105,13 @@ def ort_arch(target: str) -> str:
     if target.startswith("aarch64"):
         return "arm64"
     raise ValueError(f"unknown target: {target}")
+
+
+def ort_cache_root() -> pathlib.Path:
+    """Root of the local onnxruntime download cache (created on first use)."""
+    root = ROOT / ".ort-cache"
+    root.mkdir(exist_ok=True)
+    return root
 
 
 def _download_ort_tarball(tarball: pathlib.Path):
@@ -122,9 +131,7 @@ def _download_ort_tarball(tarball: pathlib.Path):
 def _ort_tarball() -> pathlib.Path:
     """Path to the cached onnxruntime-node tarball (downloads it once, with the
     package sha512 verified, when missing)."""
-    cache = ROOT / ".ort-cache"
-    cache.mkdir(exist_ok=True)
-    tarball = cache / f"onnxruntime-node-{ORT_VER}.tgz"
+    tarball = ort_cache_root() / f"onnxruntime-node-{ORT_VER}.tgz"
     if tarball.exists():
         return tarball
     try:
@@ -138,9 +145,7 @@ def _ort_tarball() -> pathlib.Path:
 
 def _ort_gpu_nupkg() -> pathlib.Path:
     """Path to the cached Microsoft.ML.OnnxRuntime.Gpu.Linux nupkg (zip)."""
-    cache = ROOT / ".ort-cache"
-    cache.mkdir(exist_ok=True)
-    pkg = cache / f"onnxruntime-gpu-linux-{ORT_VER}.nupkg"
+    pkg = ort_cache_root() / f"onnxruntime-gpu-linux-{ORT_VER}.nupkg"
     if pkg.exists():
         return pkg
     url = (f"https://api.nuget.org/v3-flatcontainer/"
@@ -273,12 +278,17 @@ def install_runtime(bindir: pathlib.Path, target: str, kind: str):
         raise ValueError(f"unknown runtime kind: {kind}")
 
 
-def linux_runtime_paths(kind: str):
+def runtime_zip_files(kind: str):
+    """Runtime file names to ship inside the -ai zip for a runtime kind."""
+    if kind == "dml":
+        return ORT_WIN_FILES
+    if kind == "coreml":
+        return [ORT_MACOS_DYLIB]
     if kind == "linux_cpu":
         return [ORT_LINUX_CPU_DYLIB]
     if kind == "linux_gpu":
         return ORT_LINUX_GPU_FILES
-    return []
+    raise ValueError(f"unknown runtime kind: {kind}")
 
 
 def zig(target, output):
@@ -304,9 +314,8 @@ def rm_retry(path, tries=8):
 
 
 def host_target():
-    arch = {"amd64": "x86_64", "x86_64": "x86_64",
-            "aarch64": "aarch64", "arm64": "aarch64"}.get(
-        platform.machine().lower(), platform.machine().lower())
+    machine = platform.machine().lower()
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
     if os.name == "nt":
         return f"{arch}-windows-gnu"
     if sys.platform == "darwin":
@@ -343,14 +352,8 @@ def build_and_zip(target, name, variants, out):
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED,
                              compresslevel=COMPRESS_LEVEL) as z:
             z.write(vdir / name, arcname=f"imagepolish/{name}")
-            if kind == "dml":
-                for f in ORT_WIN_FILES:
-                    z.write(vdir / f, arcname=f"imagepolish/{f}")
-            elif kind == "coreml":
-                z.write(vdir / ORT_MACOS_DYLIB, arcname=f"imagepolish/{ORT_MACOS_DYLIB}")
-            elif kind == "linux_cpu" or kind == "linux_gpu":
-                for f in linux_runtime_paths(kind):
-                    z.write(vdir / f, arcname=f"imagepolish/{f}")
+            for f in runtime_zip_files(kind):
+                z.write(vdir / f, arcname=f"imagepolish/{f}")
             for m in models:
                 z.write(m, arcname=f"imagepolish/models/{m.name}")
         print(f"  {target}{suffix}: {zip_path.name}")

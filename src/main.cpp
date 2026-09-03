@@ -43,8 +43,8 @@
 #include "chain.h"
 #include "color.h"
 #include "filters/eedi2.h"
-#include "filters/onnxsr.h"
 #include "imageio.h"
+#include "filters/onnxsr.h"
 #include "filters/resample.h"
 #include "version.h"
 
@@ -122,25 +122,34 @@ int main(int argc, char **argv)
 {
     std::vector<std::string> inputs;
     std::string output;
-    std::string dumpEedi2, dumpRs;
     std::vector<Step> steps;
     int jpegQuality = 80;
+    std::string dumpEedi2, dumpRs;
 
-    for (int i = 1; i < argc; i++) {
-        const std::string a = argv[i];
-        auto next = [&](const char *name) -> const char * {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: missing value for %s\n", name);
-                std::exit(1);
-            }
+    int i = 1;
+    // Value of a required argument; exits when the token is missing.
+    auto next = [&](const char *name) -> const char * {
+        if (i + 1 >= argc) {
+            std::fprintf(stderr, "error: missing value for %s\n", name);
+            std::exit(1);
+        }
+        return argv[++i];
+    };
+    // Optional numeric value: consumed only when the next token exists and does
+    // not start with '-'; the caller's default is kept otherwise.
+    auto nextOpt = [&](const char *dflt) -> const char * {
+        if (i + 1 < argc && argv[i + 1][0] != '-')
             return argv[++i];
-        };
-        if (a == "-i" || a == "--input") inputs.push_back(next("-i"));
-        else if (a == "-o" || a == "--output") output = next("-o");
+        return dflt;
+    };
+    for (; i < argc; i++) {
+        const std::string a = argv[i];
+        if (a == "-i" || a == "--input")
+            inputs.push_back(next("-i"));
+        else if (a == "-o" || a == "--output")
+            output = next("-o");
         else if (a == "--aa") {
-            int level = 2;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                level = std::atoi(argv[++i]);
+            const int level = std::atoi(nextOpt("2"));
             if (level < 1 || level > 2) {
                 std::fprintf(stderr, "error: --aa level must be 1 or 2\n");
                 return 1;
@@ -148,25 +157,21 @@ int main(int argc, char **argv)
             steps.push_back(Step::aa(level));
         }
         else if (a == "--denoise") {
-            float hv = 5.0f;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                hv = static_cast<float>(std::atof(argv[++i]));
+            const float hv = std::atof(nextOpt("5"));
             steps.push_back(Step::denoise(hv));
-        } else if (a == "--sharpen") {
-            float sv = 0.7f;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                sv = static_cast<float>(std::atof(argv[++i]));
+        }
+        else if (a == "--sharpen") {
+            const float sv = std::atof(nextOpt("0.7"));
             steps.push_back(Step::sharpen(sv));
-        } else if (a == "--resize") {
+        }
+        else if (a == "--resize") {
             int rw = 0, rh = 0;
             parseResize(next("--resize"), rw, rh);
             steps.push_back(Step::resize(rw, rh));
         }
         else if (a == "--dehalo") steps.push_back(Step::dehalo());
         else if (a == "--grain") {
-            float gv = 10.0f;
-            if (i + 1 < argc && argv[i + 1][0] != '-')
-                gv = static_cast<float>(std::atof(argv[++i]));
+            const float gv = std::atof(nextOpt("10"));
             if (gv < 0.0f) {
                 std::fprintf(stderr, "error: --grain variance must be >= 0\n");
                 return 1;
@@ -205,7 +210,10 @@ int main(int argc, char **argv)
             std::printf("imagepolish %s\n", IMAGEPOLISH_STR(IMAGEPOLISH_VERSION));
             return 0;
         }
-        else if (a == "-h" || a == "--help") { printHelp(); return 0; }
+        else if (a == "-h" || a == "--help") {
+            printHelp();
+            return 0;
+        }
         else {
             std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
             printHelp();
@@ -225,34 +233,27 @@ int main(int argc, char **argv)
         output.clear();
     }
 
-    for (const Step &st : steps) {
-        if (st.kind == StepKind::Denoise && st.h <= 0.0f) {
-            std::fprintf(stderr, "error: --denoise h must be positive\n");
-            return 1;
-        }
-        if (st.kind == StepKind::Sharpen && (st.h < 0.0f || st.h > 1.0f)) {
-            std::fprintf(stderr, "error: --sharpen must be in 0.0..1.0\n");
-            return 1;
-        }
-        if (st.kind == StepKind::Deband) {
-            if (st.dbr < 0 || st.dbr > 255) {
-                std::fprintf(stderr, "error: --deband range must be in 0..255\n");
-                return 1;
-            }
-            if (st.dby < 0 || st.dby > 511) {
-                std::fprintf(stderr, "error: --deband y must be in 0..511\n");
-                return 1;
-            }
-            if (st.dbc < 0 || st.dbc > 511) {
-                std::fprintf(stderr, "error: --deband cbcr must be in 0..511\n");
-                return 1;
-            }
-        }
-    }
-    if (jpegQuality < 1 || jpegQuality > 100) {
-        std::fprintf(stderr, "error: --quality must be in 1..100\n");
+    // Prints the "error: " prefix and aborts main with exit code 1.
+    auto fail = [](const char *msg) -> int {
+        std::fprintf(stderr, "error: %s\n", msg);
         return 1;
+    };
+    for (const Step &st : steps) {
+        if (st.kind == StepKind::Denoise && st.h <= 0.0f)
+            return fail("--denoise h must be positive");
+        if (st.kind == StepKind::Sharpen && (st.h < 0.0f || st.h > 1.0f))
+            return fail("--sharpen must be in 0.0..1.0");
+        if (st.kind == StepKind::Deband) {
+            if (st.dbr < 0 || st.dbr > 255)
+                return fail("--deband range must be in 0..255");
+            if (st.dby < 0 || st.dby > 511)
+                return fail("--deband y must be in 0..511");
+            if (st.dbc < 0 || st.dbc > 511)
+                return fail("--deband cbcr must be in 0..511");
+        }
     }
+    if (jpegQuality < 1 || jpegQuality > 100)
+        return fail("--quality must be in 1..100");
 
     Eedi2Params p;                       // fixed AA parameters (script defaults)
     eedi2_prepare(p);
@@ -278,18 +279,27 @@ int main(int argc, char **argv)
         Eedi2 eedi2(p);
         std::vector<u8> h2(std::size_t(img.w) * img.h * 2);
         eedi2.run(y.data(), img.w, img.h, h2.data());
+        // Write one raw gray8 dump file; returns false when the path is unusable.
+        auto dump = [](const std::string &path, const std::vector<u8> &data) -> bool {
+            if (FILE *f = std::fopen(path.c_str(), "wb")) {
+                std::fwrite(data.data(), 1, data.size(), f);
+                std::fclose(f);
+                return true;
+            }
+            return false;
+        };
         if (!dumpRs.empty()) {
             std::vector<u8> r1(std::size_t(img.w) * img.h);
             resampleV(h2.data(), img.w, img.h * 2, img.h, -0.5, r1.data());
-            FILE *f = std::fopen(dumpRs.c_str(), "wb");
-            if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpRs.c_str()); return 1; }
-            std::fwrite(r1.data(), 1, r1.size(), f);
-            std::fclose(f);
+            if (!dump(dumpRs, r1)) {
+                std::fprintf(stderr, "error: cannot write '%s'\n", dumpRs.c_str());
+                return 1;
+            }
         }
-        FILE *f = std::fopen(dumpEedi2.c_str(), "wb");
-        if (!f) { std::fprintf(stderr, "error: cannot write '%s'\n", dumpEedi2.c_str()); return 1; }
-        std::fwrite(h2.data(), 1, h2.size(), f);
-        std::fclose(f);
+        if (!dump(dumpEedi2, h2)) {
+            std::fprintf(stderr, "error: cannot write '%s'\n", dumpEedi2.c_str());
+            return 1;
+        }
         std::printf("ok: dumped eedi2 %d x %d -> %d x %d%s\n",
                     img.w, img.h, img.w, img.h * 2, dumpRs.empty() ? "" : " (+ rs)");
         return 0;
